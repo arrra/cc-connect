@@ -205,6 +205,12 @@
         "description": "Manage workspaces",
         "usage_hint": "[list|switch|add|remove]",
         "should_escape": false
+      },
+      {
+        "command": "/pin",
+        "description": "Pin text to the current session's context (v1 sessions)",
+        "usage_hint": "<text>",
+        "should_escape": false
       }
     ]
   },

@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	sessv1 "github.com/chenhg5/cc-connect/core/session"
 )
 
 const maxPlatformMessageLen = 4000
@@ -241,6 +243,9 @@ type Engine struct {
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
 	webStatusFunc func() (url string)
+
+	// v1 session management — non-nil only when CC_CONNECT_SESSIONS_V1=1 (wired in t-8).
+	v1Store sessv1.SessionStore
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -287,6 +292,10 @@ type interactiveState struct {
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	// v1 turn metrics captured inside processInteractiveEvents for post-turn logging.
+	lastTurnInputTokens  int
+	lastTurnOutputTokens int
+	lastTurnToolCount    int
 }
 
 type pendingProviderAddState struct {
@@ -2096,6 +2105,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	drainEvents(state.agentSession.Events())
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey)
+	if e.v1Store != nil {
+		promptContent = e.prependV1Context(msg.SessionKey, msg.Content, msg.MessageID, promptContent)
+	}
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2112,6 +2124,37 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+
+	// Update v1 session turn count and last-activity after the turn completes,
+	// then emit the structured turn log record for v2 Meter consumption.
+	if e.v1Store != nil {
+		if v1sess, err := e.v1Store.GetByKey(msg.SessionKey); err == nil && v1sess != nil {
+			v1sess.TurnCount++
+			v1sess.LastActivityTs = time.Now()
+			if err := e.v1Store.Update(v1sess); err != nil {
+				slog.Warn("v1: failed to update session after turn", "key", msg.SessionKey, "err", err)
+			}
+
+			state.mu.Lock()
+			inputTok := state.lastTurnInputTokens
+			outputTok := state.lastTurnOutputTokens
+			toolCnt := state.lastTurnToolCount
+			state.mu.Unlock()
+
+			ws := sessv1.BuildWorkingSet(v1sess, &sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID})
+			rec := sessv1.BuildTurnLog(
+				v1sess,
+				&ws,
+				msg.Content,
+				promptContent,
+				inputTok,
+				outputTok,
+				toolCnt,
+				time.Since(sendStart).Milliseconds(),
+			)
+			sessv1.EmitTurnLog(rec)
+		}
+	}
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -2919,6 +2962,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"output_tokens", event.OutputTokens,
 			)
 
+			// Capture v1 turn metrics so the post-turn hook can emit the structured log.
+			state.mu.Lock()
+			state.lastTurnInputTokens = event.InputTokens
+			state.lastTurnOutputTokens = event.OutputTokens
+			state.lastTurnToolCount = toolCount
+			state.mu.Unlock()
+
 			replyStart := time.Now()
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
@@ -3269,6 +3319,7 @@ var builtinCommands = []struct {
 	{[]string{"whoami", "myid"}, "whoami"},
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
+	{[]string{"pin"}, "pin"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3469,6 +3520,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWhoami(p, msg)
 	case "web":
 		e.cmdWeb(p, msg, args)
+	case "pin":
+		e.cmdPin(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -11115,6 +11168,95 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+}
+
+// SetV1Store installs the v1 session store on the engine, activating per-turn
+// working set injection. Called by the CC_CONNECT_SESSIONS_V1 startup path (t-8).
+func (e *Engine) SetV1Store(store sessv1.SessionStore) {
+	e.v1Store = store
+}
+
+// cmdPin handles the /pin slash command. It adds a pinned item to the active
+// v1 session and persists it to disk. When sessions are disabled or no active
+// session exists it replies with a user-visible explanation.
+func (e *Engine) cmdPin(p Platform, msg *Message, args []string) {
+	if e.v1Store == nil {
+		e.reply(p, msg.ReplyCtx, "Sessions feature disabled. Set CC_CONNECT_SESSIONS_V1=1 to enable.")
+		return
+	}
+
+	text := strings.TrimSpace(strings.Join(args, " "))
+	if text == "" {
+		e.reply(p, msg.ReplyCtx, "Usage: /pin <text>")
+		return
+	}
+
+	sess, err := e.v1Store.GetByKey(msg.SessionKey)
+	if err != nil {
+		slog.Error("v1: /pin: session lookup failed", "key", msg.SessionKey, "err", err)
+		e.reply(p, msg.ReplyCtx, "Internal error looking up session.")
+		return
+	}
+	if sess == nil {
+		e.reply(p, msg.ReplyCtx, "No active session for this thread. @mention me first to start one.")
+		return
+	}
+
+	sess.Pinned = append(sess.Pinned, sessv1.PinnedItem{
+		Text:     text,
+		Source:   "user_explicit",
+		PinnedAt: time.Now(),
+		PinnedBy: msg.UserID,
+	})
+	if err := e.v1Store.Update(sess); err != nil {
+		slog.Error("v1: /pin: update session failed", "key", msg.SessionKey, "err", err)
+		e.reply(p, msg.ReplyCtx, "Internal error saving pin.")
+		return
+	}
+	if err := e.v1Store.SavePins(); err != nil {
+		// Non-fatal — pin is held in memory even if the disk flush failed.
+		slog.Warn("v1: /pin: persist pins failed", "key", msg.SessionKey, "err", err)
+	}
+
+	truncated := text
+	if len(truncated) > 80 {
+		truncated = truncated[:80] + "…"
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("📌 Pinned: \"%s\"", truncated))
+}
+
+// prependV1Context looks up the v1 session for sessionKey, builds the working
+// set for the current turn, and prepends the serialized context to prompt.
+// Returns prompt unchanged when the session is not found or v1Store is nil.
+//
+// NOTE: The Claude Code CLI (--input-format stream-json) does not support
+// per-turn system messages via stdin; only --append-system-prompt at session
+// creation time sets the system role. For v1, the working set JSON is injected
+// as a clearly-delimited context block prepended to the user message.
+// See PR description for v2 migration to true system-role injection.
+func (e *Engine) prependV1Context(sessionKey, msgContent, msgTS, prompt string) string {
+	if e.v1Store == nil {
+		return prompt
+	}
+	sess, err := e.v1Store.GetByKey(sessionKey)
+	if err != nil {
+		slog.Warn("v1: session lookup failed", "key", sessionKey, "err", err)
+		return prompt
+	}
+	if sess == nil {
+		return prompt
+	}
+
+	recentMsg := &sessv1.UserMessage{Text: msgContent, Ts: msgTS}
+	ws := sessv1.BuildWorkingSet(sess, recentMsg)
+
+	ctx, err := sessv1.MarshalSystemContext(ws)
+	if err != nil {
+		slog.Warn("v1: marshal session context failed", "err", err)
+		return prompt
+	}
+
+	return "<cc-connect:session_context>\n" + ctx + "\n</cc-connect:session_context>\n\n" + prompt
 }
 
 func extractChannelID(sessionKey string) string {
