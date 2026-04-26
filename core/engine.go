@@ -1562,6 +1562,18 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+
+	// v1 spawn-or-attach: ensure cmdPin and prependV1Context can find the session.
+	// Uses msg.SessionKey (same key as cmdPin) — no key drift with the legacy path.
+	// Spawn failure is warn-logged and does NOT block the legacy turn.
+	if e.v1Store != nil {
+		if existing, _ := e.v1Store.GetByKey(msg.SessionKey); existing == nil {
+			if _, err := e.v1Store.Spawn(msg.SessionKey, content); err != nil {
+				slog.Warn("v1: spawn failed", "session_key", msg.SessionKey, "err", err)
+			}
+		}
+	}
+
 	if !session.TryLock() {
 		// Check for /btw — inject into the running session mid-turn
 		trimmed := strings.TrimSpace(content)
