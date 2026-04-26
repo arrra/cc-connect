@@ -2128,13 +2128,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Update v1 session turn count and last-activity after the turn completes,
 	// then emit the structured turn log record for v2 Meter consumption.
 	if e.v1Store != nil {
-		if v1sess, err := e.v1Store.GetByKey(msg.SessionKey); err == nil && v1sess != nil {
-			v1sess.TurnCount++
-			v1sess.LastActivityTs = time.Now()
-			if err := e.v1Store.Update(v1sess); err != nil {
-				slog.Warn("v1: failed to update session after turn", "key", msg.SessionKey, "err", err)
-			}
-
+		if v1sess, err := e.v1Store.IncrementTurn(msg.SessionKey); err == nil && v1sess != nil {
 			state.mu.Lock()
 			inputTok := state.lastTurnInputTokens
 			outputTok := state.lastTurnOutputTokens
@@ -11186,31 +11180,34 @@ func (e *Engine) cmdPin(p Platform, msg *Message, args []string) {
 	}
 
 	text := strings.TrimSpace(strings.Join(args, " "))
+	pinnedVia := ""
 	if text == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /pin <text>")
-		return
+		if msg.ParentText == "" {
+			e.reply(p, msg.ReplyCtx, "Usage: /pin <text> OR reply to a message and run /pin")
+			return
+		}
+		text = msg.ParentText
+		pinnedVia = "reply_to"
 	}
 
-	sess, err := e.v1Store.GetByKey(msg.SessionKey)
+	sess, err := e.v1Store.AddPin(msg.SessionKey, sessv1.PinnedItem{
+		Text:      text,
+		Source:    "user_explicit",
+		PinnedAt:  time.Now(),
+		PinnedBy:  msg.UserID,
+		PinnedVia: pinnedVia,
+	})
 	if err != nil {
-		slog.Error("v1: /pin: session lookup failed", "key", msg.SessionKey, "err", err)
-		e.reply(p, msg.ReplyCtx, "Internal error looking up session.")
+		if errors.Is(err, sessv1.ErrPinLimitReached) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("📌 Pin limit reached (%d pins). Terminate the session with /done to clear pins.", sessv1.MaxPinsPerSession))
+			return
+		}
+		slog.Error("v1: /pin: add pin failed", "key", msg.SessionKey, "err", err)
+		e.reply(p, msg.ReplyCtx, "Internal error saving pin.")
 		return
 	}
 	if sess == nil {
 		e.reply(p, msg.ReplyCtx, "No active session for this thread. @mention me first to start one.")
-		return
-	}
-
-	sess.Pinned = append(sess.Pinned, sessv1.PinnedItem{
-		Text:     text,
-		Source:   "user_explicit",
-		PinnedAt: time.Now(),
-		PinnedBy: msg.UserID,
-	})
-	if err := e.v1Store.Update(sess); err != nil {
-		slog.Error("v1: /pin: update session failed", "key", msg.SessionKey, "err", err)
-		e.reply(p, msg.ReplyCtx, "Internal error saving pin.")
 		return
 	}
 	if err := e.v1Store.SavePins(); err != nil {

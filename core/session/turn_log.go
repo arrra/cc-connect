@@ -1,19 +1,13 @@
 package session
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
-	"os"
 	"time"
 )
-
-// TurnLogOutput is the writer for v1 turn log records (one JSON line per turn).
-// Defaults to os.Stdout. Override in tests to capture output.
-var TurnLogOutput io.Writer = os.Stdout
 
 // TurnLogRecord is the structured log record emitted after each Claude Code turn.
 // v2's Meter computes session signals from this schema — do not add fields in v1.
@@ -120,17 +114,27 @@ func BuildTurnLog(
 	}
 }
 
-// EmitTurnLog serializes rec as a single JSON line to TurnLogOutput.
-// Also logs a summary via slog for operator visibility in structured log streams.
+// EmitTurnLog emits rec as a structured slog entry at INFO level ("v1_turn").
+// All 15 schema fields are emitted as log attrs. Configure the default slog handler
+// to control output format and destination (e.g. slog.NewJSONHandler for structured logs).
 func EmitTurnLog(rec TurnLogRecord) {
-	b, err := json.Marshal(rec)
-	if err != nil {
-		slog.Warn("v1: failed to marshal turn log", "err", err)
-		return
-	}
-	fmt.Fprintln(TurnLogOutput, string(b))
-	slog.Info("v1_turn", "session_id", rec.SessionID, "turn_count", rec.TurnCount,
-		"latency_ms", rec.ResponseLatencyMs, "pinned", rec.PinnedCount)
+	slog.LogAttrs(context.Background(), slog.LevelInfo, "v1_turn",
+		slog.Time("timestamp", rec.Timestamp),
+		slog.String("session_id", rec.SessionID),
+		slog.String("session_key", rec.SessionKey),
+		slog.Int("turn_count", rec.TurnCount),
+		slog.Int("prompt_tokens", rec.PromptTokens),
+		slog.Int("response_tokens", rec.ResponseTokens),
+		slog.Int64("response_latency_ms", rec.ResponseLatencyMs),
+		slog.String("user_message_hash", rec.UserMessageHash),
+		slog.Int("hex_retrieval_token_count", rec.HexRetrievalTokenCount),
+		slog.Int("tool_results_count", rec.ToolResultsCount),
+		slog.Int("working_set_item_count", rec.WorkingSetItemCount),
+		slog.Int("working_set_token_estimate", rec.WorkingSetTokenEstimate),
+		slog.Int("pinned_count", rec.PinnedCount),
+		slog.Any("kept", rec.Kept),
+		slog.Any("evicted", rec.Evicted),
+	)
 }
 
 // HashUserMessage returns the hex-encoded SHA-256 of text (PII-safe).

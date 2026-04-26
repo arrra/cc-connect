@@ -1,6 +1,18 @@
 package session
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// MaxPinsPerSession is the maximum number of pinned items a session may hold.
+// v1 cap; may revisit in v2 once usage data exists. Chosen to cover realistic
+// "pin key facts" usage (~5-10 pins per session) with comfortable headroom.
+const MaxPinsPerSession = 20
+
+// ErrPinLimitReached is returned by AddPin when the session already holds
+// MaxPinsPerSession pins.
+var ErrPinLimitReached = errors.New("pin limit reached")
 
 // PinnedItem is a single item pinned by the user to survive eviction.
 type PinnedItem struct {
@@ -8,6 +20,7 @@ type PinnedItem struct {
 	Source    string    `json:"source"`
 	PinnedAt  time.Time `json:"pinned_at"`
 	PinnedBy  string    `json:"pinned_by"`
+	PinnedVia string    `json:"pinned_via,omitempty"` // "reply_to" when pinned by replying; empty for text-arg pins
 }
 
 // WorkingSet is rebuilt each turn before invoking Claude Code.
@@ -16,6 +29,10 @@ type WorkingSet struct {
 	RootObjective    string         `json:"root_objective"`
 	Pinned           []PinnedItem   `json:"pinned"`
 	RecentUserMessage *UserMessage  `json:"recent_user_message"`
+	// RecentToolResult is reserved for the most recent tool output per the spec's working_set rules.
+	// v1 LIMITATION: this field is never populated — the engine does not currently track tool results.
+	// v2 will wire tool result capture from the Claude Code invocation path (see docs/sessions.md
+	// "Known v1 limitations"). Until v2, this field will always be nil in the marshalled JSON.
 	RecentToolResult  *ToolResult   `json:"recent_tool_result"`
 }
 

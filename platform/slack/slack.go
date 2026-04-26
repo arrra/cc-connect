@@ -248,6 +248,23 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			Content:  content,
 			ReplyCtx: replyContext{channel: cmd.ChannelID},
 		}
+
+		// Slack slash commands don't include thread context in the parsed struct,
+		// but the raw Socket Mode payload does carry thread_ts when invoked in a thread.
+		// Extract it and fetch the root message text for /pin reply-to support.
+		if evt.Request != nil {
+			var raw struct {
+				ThreadTs string `json:"thread_ts"`
+			}
+			if err := json.Unmarshal(evt.Request.Payload, &raw); err == nil && raw.ThreadTs != "" {
+				if parentText, err := p.fetchThreadRootText(context.Background(), cmd.ChannelID, raw.ThreadTs); err == nil {
+					msg.ParentText = parentText
+				} else {
+					slog.Debug("slack: fetch thread root for /pin", "err", err)
+				}
+			}
+		}
+
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
 
@@ -643,6 +660,27 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 			}
 		}
 	}
+}
+
+// fetchThreadRootText retrieves the text of the root message for a given thread.
+// Used to populate Message.ParentText when /pin is invoked from within a thread.
+// Calls conversations.replies (rate-limited: Tier 3, ~50 req/min per workspace).
+// Latency is typically 100–400ms; avoid calling for every message — only invoked
+// for slash commands that have a thread_ts in the raw Socket Mode payload.
+func (p *Platform) fetchThreadRootText(ctx context.Context, channelID, threadTs string) (string, error) {
+	msgs, _, _, err := p.client.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{
+		ChannelID: channelID,
+		Timestamp: threadTs,
+		Limit:     1,
+		Inclusive: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("conversations.replies: %w", err)
+	}
+	if len(msgs) == 0 {
+		return "", fmt.Errorf("no messages in thread %s", threadTs)
+	}
+	return msgs[0].Text, nil
 }
 
 func (p *Platform) Stop() error {

@@ -60,6 +60,8 @@ func (s *InMemorySessionStore) Spawn(sessionKey, rootObjective string) (*Session
 }
 
 // GetByKey returns the session for sessionKey, or nil if none exists.
+// READ-ONLY — do not mutate the returned pointer. Use IncrementTurn, AddPin,
+// or SetWorkingSet for operations that modify session state.
 func (s *InMemorySessionStore) GetByKey(sessionKey string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,6 +71,58 @@ func (s *InMemorySessionStore) GetByKey(sessionKey string) (*Session, error) {
 		return nil, nil
 	}
 	return sess, nil
+}
+
+// IncrementTurn atomically increments TurnCount and sets LastActivityTs = now.
+// Returns a shallow copy of the updated session, or (nil, nil) if no session exists.
+func (s *InMemorySessionStore) IncrementTurn(sessionKey string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, nil
+	}
+	sess.TurnCount++
+	sess.LastActivityTs = time.Now()
+	copy := *sess
+	return &copy, nil
+}
+
+// AddPin atomically appends pin to the session's Pinned slice.
+// Returns ErrPinLimitReached if the session already holds MaxPinsPerSession pins.
+// Returns a shallow copy of the updated session, or (nil, nil) if no session exists.
+func (s *InMemorySessionStore) AddPin(sessionKey string, pin PinnedItem) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, nil
+	}
+	if len(sess.Pinned) >= MaxPinsPerSession {
+		return nil, ErrPinLimitReached
+	}
+	sess.Pinned = append(sess.Pinned, pin)
+	copy := *sess
+	return &copy, nil
+}
+
+// SetWorkingSet atomically replaces the session's WorkingSet.
+// Returns a shallow copy of the updated session, or (nil, nil) if no session exists.
+func (s *InMemorySessionStore) SetWorkingSet(sessionKey string, ws *WorkingSet) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, nil
+	}
+	if ws != nil {
+		sess.WorkingSet = *ws
+	}
+	copy := *sess
+	return &copy, nil
 }
 
 // Update replaces the stored session with the caller-supplied value.

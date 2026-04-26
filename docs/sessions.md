@@ -29,15 +29,6 @@ CC_CONNECT_SESSIONS_V1=1 cc-connect
 
 To roll back instantly, unset the variable or set it to `0` and restart. The old accumulating-context behavior resumes immediately with no state migration required.
 
-If you use `config.toml`, you can also set:
-
-```toml
-[v1_sessions]
-enabled = true
-```
-
-The environment variable takes precedence over the config file value.
-
 ## Restart behavior
 
 Sessions are held in memory. On daemon restart:

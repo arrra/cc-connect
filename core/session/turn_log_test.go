@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -117,8 +118,8 @@ func TestBuildTurnLog_AllFieldsPresent(t *testing.T) {
 	}
 }
 
-// TestEmitTurnLog_WritesJSON verifies EmitTurnLog writes a parseable JSON line.
-func TestEmitTurnLog_WritesJSON(t *testing.T) {
+// TestEmitTurnLog_SlogFields verifies EmitTurnLog emits all 15 schema fields via slog.
+func TestEmitTurnLog_SlogFields(t *testing.T) {
 	sess := &Session{
 		SessionID:  "emit-test-id",
 		SessionKey: "C999",
@@ -130,26 +131,40 @@ func TestEmitTurnLog_WritesJSON(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	orig := TurnLogOutput
-	TurnLogOutput = &buf
-	defer func() { TurnLogOutput = orig }()
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
 
 	rec := BuildTurnLog(sess, ws, "hello", "prompt", 0, 0, 0, 500)
 	EmitTurnLog(rec)
 
 	line := strings.TrimSpace(buf.String())
 	if line == "" {
-		t.Fatal("EmitTurnLog wrote nothing")
+		t.Fatal("EmitTurnLog wrote nothing to slog")
 	}
 
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &parsed); err != nil {
-		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, line)
+		t.Fatalf("slog output is not valid JSON: %v\noutput: %s", err, line)
 	}
 
-	// Check session_id round-trips.
+	required := []string{
+		"timestamp", "session_id", "session_key", "turn_count",
+		"prompt_tokens", "response_tokens", "response_latency_ms", "user_message_hash",
+		"hex_retrieval_token_count", "tool_results_count", "working_set_item_count",
+		"working_set_token_estimate", "pinned_count", "kept", "evicted",
+	}
+	for _, field := range required {
+		if _, exists := parsed[field]; !exists {
+			t.Errorf("slog output missing field: %s", field)
+		}
+	}
+
 	if parsed["session_id"] != "emit-test-id" {
-		t.Errorf("session_id = %v", parsed["session_id"])
+		t.Errorf("session_id = %v, want emit-test-id", parsed["session_id"])
+	}
+	if parsed["response_latency_ms"].(float64) != 500 {
+		t.Errorf("response_latency_ms = %v, want 500", parsed["response_latency_ms"])
 	}
 }
 
