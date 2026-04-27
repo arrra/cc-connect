@@ -104,6 +104,19 @@ func (c *Client) Enabled() bool {
 	return c.enabled
 }
 
+// NewClientForTest constructs an enabled Client with an injected exec function.
+// Use in core-package tests that call SetHexClient on the engine but cannot
+// import unexported hexmem fields directly.
+func NewClientForTest(hexRoot, savePath, srchPath string, fn func(ctx context.Context, name string, args ...string) ([]byte, error)) *Client {
+	return &Client{
+		cfg:      Config{HexRoot: hexRoot, Enabled: true},
+		savePath: savePath,
+		srchPath: srchPath,
+		enabled:  true,
+		exec:     fn,
+	}
+}
+
 // Save persists item to hex asynchronously. It returns immediately; errors are
 // logged via slog.Warn. Safe to call when disabled.
 func (c *Client) Save(ctx context.Context, item MemoryItem) {
