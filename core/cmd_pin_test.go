@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	sessv1 "github.com/chenhg5/cc-connect/core/session"
 )
@@ -531,5 +532,387 @@ func TestCmdPin_WithText_PersistsAndInjects(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], pinTxt) {
 		t.Errorf("reply should include pinned text, got: %q", sent[0])
+	}
+}
+
+// ── /context tests ──────────────────────────────────────────────────────────
+
+func TestCmdContext_NoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	msg := &Message{SessionKey: "slack:C900:U900", ReplyCtx: "ctx"}
+	e.cmdContext(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "No active session") {
+		t.Errorf("expected 'No active session', got: %q", sent[0])
+	}
+}
+
+func TestCmdContext_EmptySession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C901:U901"
+	if _, err := store.Spawn(key, ""); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+	e.cmdContext(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "(none)") {
+		t.Errorf("expected '(none)' for empty pins, got: %q", sent[0])
+	}
+	if !strings.Contains(sent[0], "(not set)") {
+		t.Errorf("expected '(not set)' for empty objective, got: %q", sent[0])
+	}
+}
+
+func TestCmdContext_WithPins(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C902:U902"
+	if _, err := store.Spawn(key, "build the feature"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "first pin", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 1: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "second pin", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 2: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+	e.cmdContext(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	reply := sent[0]
+	if !strings.Contains(reply, "build the feature") {
+		t.Errorf("expected objective in reply, got: %q", reply)
+	}
+	if !strings.Contains(reply, "1.") || !strings.Contains(reply, "first pin") {
+		t.Errorf("expected pin 1 listed, got: %q", reply)
+	}
+	if !strings.Contains(reply, "2.") || !strings.Contains(reply, "second pin") {
+		t.Errorf("expected pin 2 listed, got: %q", reply)
+	}
+}
+
+// ── /forget tests ────────────────────────────────────────────────────────────
+
+func TestCmdForget_ByIndex_Happy(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C910:U910"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "pin alpha", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 1: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "pin beta", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 2: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U910"}
+	e.cmdForget(p, msg, []string{"1"})
+
+	sess, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey: %v", err)
+	}
+	if len(sess.Pinned) != 1 {
+		t.Fatalf("expected 1 pin after forget, got %d", len(sess.Pinned))
+	}
+	if sess.Pinned[0].Text != "pin beta" {
+		t.Errorf("surviving pin = %q, want %q", sess.Pinned[0].Text, "pin beta")
+	}
+}
+
+func TestCmdForget_ByIndex_OutOfRange(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C911:U911"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "only pin", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U911"}
+	e.cmdForget(p, msg, []string{"99"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "No pin #99") {
+		t.Errorf("expected 'No pin #99', got: %q", sent[0])
+	}
+}
+
+func TestCmdForget_ByText_Happy(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C912:U912"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "remember the deadline", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 1: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "review the spec", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 2: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U912"}
+	e.cmdForget(p, msg, []string{"deadline"})
+
+	sess, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey: %v", err)
+	}
+	if len(sess.Pinned) != 1 {
+		t.Fatalf("expected 1 pin after text-match forget, got %d", len(sess.Pinned))
+	}
+	if sess.Pinned[0].Text != "review the spec" {
+		t.Errorf("surviving pin = %q, want %q", sess.Pinned[0].Text, "review the spec")
+	}
+}
+
+func TestCmdForget_ByText_Ambiguous(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C913:U913"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "review feature A", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 1: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "review feature B", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin 2: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U913"}
+	e.cmdForget(p, msg, []string{"review"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "Multiple matches") {
+		t.Errorf("expected 'Multiple matches', got: %q", sent[0])
+	}
+}
+
+func TestCmdForget_ByText_NoMatch(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C914:U914"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "some pinned text", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U914"}
+	e.cmdForget(p, msg, []string{"nonexistent"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "No pin matching") {
+		t.Errorf("expected 'No pin matching', got: %q", sent[0])
+	}
+}
+
+func TestCmdForget_NoArgs(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C915:U915"
+	if _, err := store.Spawn(key, "objective"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U915"}
+	e.cmdForget(p, msg, []string{})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "Usage:") {
+		t.Errorf("expected 'Usage:', got: %q", sent[0])
+	}
+}
+
+// ── /reset-scope tests ───────────────────────────────────────────────────────
+
+func TestCmdResetScope_Happy(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const key = "slack:C920:U920"
+	if _, err := store.Spawn(key, "build the product"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := store.AddPin(key, sessv1.PinnedItem{Text: "pin one", PinnedAt: time.Now(), Source: "user_explicit"}); err != nil {
+		t.Fatalf("AddPin: %v", err)
+	}
+	if _, err := store.IncrementTurn(key); err != nil {
+		t.Fatalf("IncrementTurn: %v", err)
+	}
+
+	sessBeforeReset, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey before reset: %v", err)
+	}
+	turnCountBefore := sessBeforeReset.TurnCount
+
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx", UserID: "U920"}
+	e.cmdResetScope(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "Scope reset") {
+		t.Errorf("expected 'Scope reset', got: %q", sent[0])
+	}
+
+	sess, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey after reset: %v", err)
+	}
+	if len(sess.Pinned) != 0 {
+		t.Errorf("expected 0 pins after reset, got %d", len(sess.Pinned))
+	}
+	if sess.RootObjective != "" {
+		t.Errorf("expected empty RootObjective after reset, got: %q", sess.RootObjective)
+	}
+	if sess.TurnCount != turnCountBefore {
+		t.Errorf("TurnCount changed: before=%d after=%d (must be preserved)", turnCountBefore, sess.TurnCount)
+	}
+}
+
+func TestCmdResetScope_NoSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	msg := &Message{SessionKey: "slack:C921:U921", ReplyCtx: "ctx"}
+	e.cmdResetScope(p, msg)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply, got none")
+	}
+	if !strings.Contains(sent[0], "No active session") {
+		t.Errorf("expected 'No active session', got: %q", sent[0])
+	}
+}
+
+// ── thread session inheritance tests ─────────────────────────────────────────
+
+// TestThreadSessionInheritsChannelPins verifies v1.2b hierarchical pin inheritance:
+// a thread session's working set includes PINNED items from the parent channel session,
+// and /forget on an inherited pin returns the right error instead of silent no-match.
+func TestThreadSessionInheritsChannelPins(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const channelKey = "slack:C001"
+	const threadKey = "slack:C001:1111.2222"
+
+	// Set up channel session with a pinned item.
+	if _, err := store.Spawn(channelKey, "channel objective"); err != nil {
+		t.Fatalf("Spawn channel: %v", err)
+	}
+	if _, err := store.AddPin(channelKey, sessv1.PinnedItem{
+		Text:     "approved vendor: AWS",
+		Source:   "user_explicit",
+		PinnedAt: time.Now(),
+		PinnedBy: "U001",
+	}); err != nil {
+		t.Fatalf("AddPin channel: %v", err)
+	}
+
+	// Set up thread session with no local pins.
+	if _, err := store.Spawn(threadKey, "thread objective"); err != nil {
+		t.Fatalf("Spawn thread: %v", err)
+	}
+
+	// Build working set for thread → should include inherited channel pin.
+	injected := e.prependV1Context(threadKey, "what's the vendor policy?", "1111.3000", "prompt")
+	if !strings.Contains(injected, "approved vendor: AWS") {
+		t.Errorf("thread working set missing inherited channel pin; got:\n%s", injected)
+	}
+
+	// Attempt /forget on the inherited pin from the thread session.
+	p.clearSent()
+	msg := &Message{SessionKey: threadKey, ReplyCtx: "ctx", UserID: "U001"}
+	e.cmdForget(p, msg, []string{"approved vendor: AWS"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply from /forget, got none")
+	}
+	if !strings.Contains(sent[0], "inherited from the channel session") {
+		t.Errorf("/forget on inherited pin: expected 'inherited from the channel session', got: %q", sent[0])
+	}
+
+	// Verify the channel pin is still intact (not silently removed).
+	channelPins, err := store.GetPinnedByKey(channelKey)
+	if err != nil {
+		t.Fatalf("GetPinnedByKey: %v", err)
+	}
+	if len(channelPins) != 1 || channelPins[0].Text != "approved vendor: AWS" {
+		t.Errorf("channel pin was modified; got: %v", channelPins)
 	}
 }

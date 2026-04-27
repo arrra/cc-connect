@@ -115,8 +115,8 @@ func (s *InMemorySessionStore) IncrementTurn(sessionKey string) (*Session, error
 	}
 	sess.TurnCount++
 	sess.LastActivityTs = time.Now()
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // AddPin atomically appends pin to the session's Pinned slice.
@@ -137,8 +137,47 @@ func (s *InMemorySessionStore) AddPin(sessionKey string, pin PinnedItem) (*Sessi
 		return nil, ErrPinLimitReached
 	}
 	sess.Pinned = append(sess.Pinned, pin)
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
+}
+
+// RemovePin removes the pin at 0-based idx from the session's Pinned slice.
+// Returns ErrSessionNotFound if no session exists, ErrPinNotFound if idx is out of range.
+// SavePins must be called by the caller after this returns to persist the change.
+func (s *InMemorySessionStore) RemovePin(sessionKey string, idx int) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	if idx < 0 || idx >= len(sess.Pinned) {
+		return nil, ErrPinNotFound
+	}
+	newPins := make([]PinnedItem, 0, len(sess.Pinned)-1)
+	newPins = append(newPins, sess.Pinned[:idx]...)
+	newPins = append(newPins, sess.Pinned[idx+1:]...)
+	sess.Pinned = newPins
+	snap := *sess
+	return &snap, nil
+}
+
+// ResetScope clears the session's Pinned slice and RootObjective without terminating it.
+// Returns ErrSessionNotFound if no session exists.
+// SavePins must be called by the caller after this returns to persist the change.
+func (s *InMemorySessionStore) ResetScope(sessionKey string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	sess.RootObjective = ""
+	sess.Pinned = nil
+	snap := *sess
+	return &snap, nil
 }
 
 // SetWorkingSet atomically replaces the session's WorkingSet.
@@ -154,8 +193,8 @@ func (s *InMemorySessionStore) SetWorkingSet(sessionKey string, ws *WorkingSet) 
 	if ws != nil {
 		sess.WorkingSet = *ws
 	}
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // Update replaces the stored session with the caller-supplied value.
@@ -202,6 +241,43 @@ func (s *InMemorySessionStore) SavePins() error {
 		return nil
 	}
 	return s.pinStore.Save(s.collectAllPinsLocked())
+}
+
+// AppendTurn records a TurnSnapshot to the session's TurnHistory, capped at MaxTurnHistory.
+func (s *InMemorySessionStore) AppendTurn(sessionKey string, snap TurnSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	sess.TurnHistory = append(sess.TurnHistory, snap)
+	if len(sess.TurnHistory) > MaxTurnHistory {
+		sess.TurnHistory = sess.TurnHistory[len(sess.TurnHistory)-MaxTurnHistory:]
+	}
+	return nil
+}
+
+// GetPinnedByKey returns a defensive copy of the pins for the given key.
+// Active sessions take precedence over savedPins. Returns nil, nil if neither exists.
+func (s *InMemorySessionStore) GetPinnedByKey(key string) ([]PinnedItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if sess, ok := s.sessions[key]; ok {
+		if len(sess.Pinned) == 0 {
+			return nil, nil
+		}
+		result := make([]PinnedItem, len(sess.Pinned))
+		copy(result, sess.Pinned)
+		return result, nil
+	}
+	if saved, ok := s.savedPins[key]; ok && len(saved) > 0 {
+		result := make([]PinnedItem, len(saved))
+		copy(result, saved)
+		return result, nil
+	}
+	return nil, nil
 }
 
 // collectAllPinsLocked builds a unified map of all pins across savedPins and

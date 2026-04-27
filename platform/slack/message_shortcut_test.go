@@ -52,8 +52,8 @@ func TestSlackMessageShortcutHandler_RoutesToEngine(t *testing.T) {
 		t.Fatalf("expected 1 shortcutHandler call, got %d", len(calls))
 	}
 	got := calls[0]
-	if got.sessionKey != "slack:C1:U001" {
-		t.Errorf("sessionKey = %q, want %q", got.sessionKey, "slack:C1:U001")
+	if got.sessionKey != "slack:C1:t1" {
+		t.Errorf("sessionKey = %q, want %q", got.sessionKey, "slack:C1:t1")
 	}
 	if got.messageText != "hello" {
 		t.Errorf("messageText = %q, want %q", got.messageText, "hello")

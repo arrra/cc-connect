@@ -9,7 +9,7 @@ import (
 )
 
 // TestBuildWorkingSet_ThreeTurns verifies that BuildWorkingSet + MarshalSystemContext
-// produce exactly the 4 locked fields and that only the current turn's user message
+// produce the 7-field v1.3+ shape and that only the current turn's user message
 // appears (prior turn messages are evicted).
 func TestBuildWorkingSet_ThreeTurns(t *testing.T) {
 	store := NewInMemorySessionStore(nil, nil)
@@ -59,8 +59,12 @@ func TestBuildWorkingSet_ThreeTurns(t *testing.T) {
 		t.Fatalf("unmarshal turn 3 context: %v", err)
 	}
 
-	// Assert exactly 4 top-level fields.
-	wantFields := []string{"root_objective", "pinned", "recent_user_message", "recent_tool_result"}
+	// Assert all 7 top-level fields (v1.3+ shape).
+	wantFields := []string{
+		"root_objective", "pinned", "active_turns",
+		"optional_items", "quarantined_items",
+		"recent_user_message", "recent_tool_result",
+	}
 	if len(parsed) != len(wantFields) {
 		t.Errorf("expected %d top-level fields, got %d: %v", len(wantFields), len(parsed), parsed)
 	}
@@ -183,7 +187,7 @@ func TestBuildWorkingSet_ToolResultCarryForward(t *testing.T) {
 }
 
 // TestBuildWorkingSet_TenTurnsNoLeak verifies that after 10 turns, the working
-// set contains exactly the 4 locked fields and no prior-turn user messages leak.
+// set contains the 7-field v1.3+ shape and no prior-turn user messages leak.
 // This is the spec's explicit 10-turn eviction requirement.
 func TestBuildWorkingSet_TenTurnsNoLeak(t *testing.T) {
 	store := NewInMemorySessionStore(nil, nil)
@@ -240,8 +244,12 @@ func TestBuildWorkingSet_TenTurnsNoLeak(t *testing.T) {
 		t.Fatalf("unmarshal turn 10 context: %v", err)
 	}
 
-	// Exactly 4 top-level fields.
-	wantFields := []string{"root_objective", "pinned", "recent_user_message", "recent_tool_result"}
+	// All 7 top-level fields (v1.3+ shape).
+	wantFields := []string{
+		"root_objective", "pinned", "active_turns",
+		"optional_items", "quarantined_items",
+		"recent_user_message", "recent_tool_result",
+	}
 	if len(parsed) != len(wantFields) {
 		t.Errorf("expected %d fields, got %d: %v", len(wantFields), len(parsed), parsed)
 	}
@@ -275,8 +283,8 @@ func TestBuildWorkingSet_TenTurnsNoLeak(t *testing.T) {
 	}
 }
 
-// TestMarshalSystemContext_FourFieldsOnly verifies the locked JSON shape.
-func TestMarshalSystemContext_FourFieldsOnly(t *testing.T) {
+// TestMarshalSystemContext_SevenFields verifies the v1.3+ JSON shape has exactly 7 fields.
+func TestMarshalSystemContext_SevenFields(t *testing.T) {
 	ws := WorkingSet{
 		RootObjective:     "review PR #42",
 		Pinned:            []PinnedItem{},
@@ -292,7 +300,17 @@ func TestMarshalSystemContext_FourFieldsOnly(t *testing.T) {
 	if err := json.Unmarshal([]byte(ctx), &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(parsed) != 4 {
-		t.Errorf("expected exactly 4 fields, got %d: %v", len(parsed), parsed)
+	wantFields := []string{
+		"root_objective", "pinned", "active_turns",
+		"optional_items", "quarantined_items",
+		"recent_user_message", "recent_tool_result",
+	}
+	if len(parsed) != len(wantFields) {
+		t.Errorf("expected exactly %d fields, got %d: %v", len(wantFields), len(parsed), parsed)
+	}
+	for _, f := range wantFields {
+		if _, ok := parsed[f]; !ok {
+			t.Errorf("missing field %q", f)
+		}
 	}
 }

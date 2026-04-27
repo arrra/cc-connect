@@ -996,13 +996,15 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	workDir := filepath.Join(homeDir, "codes", "cc-connect")
+	os.MkdirAll(workDir, 0755)
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
 			model:           "gpt-5.4",
 			reasoningEffort: "xhigh",
 		},
-		workDir: filepath.Join(homeDir, "codes", "cc-connect"),
+		workDir: workDir,
 		report: &UsageReport{
 			Buckets: []UsageBucket{{
 				Name: "Rate limit",
@@ -1091,6 +1093,8 @@ func TestProcessInteractiveEvents_DoesNotAppendReplyFooterWhenDisabled(t *testin
 func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	sessionWorkDir := filepath.Join(homeDir, "codes", "cc-connect")
+	os.MkdirAll(sessionWorkDir, 0755)
 
 	agent := &stubReplyFooterAgent{
 		stubModelModeAgent: stubModelModeAgent{
@@ -1118,7 +1122,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	agentSession := newControllableSession("s-footer-runtime")
 	agentSession.model = "gpt-5.4"
 	agentSession.reasoningEffort = "xhigh"
-	agentSession.workDir = filepath.Join(homeDir, "codes", "cc-connect")
+	agentSession.workDir = sessionWorkDir
 	agentSession.report = &UsageReport{
 		Buckets: []UsageBucket{{
 			Name: "Rate limit",
@@ -7462,12 +7466,16 @@ func TestResolveLocalDirPath_AcceptsSubdir(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "project")
 	os.MkdirAll(sub, 0755)
+	wantPath, err := filepath.EvalSymlinks(sub)
+	if err != nil {
+		wantPath = sub
+	}
 	got, err := resolveLocalDirPath("project", base)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != sub {
-		t.Fatalf("expected %q, got %q", sub, got)
+	if got != wantPath {
+		t.Fatalf("expected %q, got %q", wantPath, got)
 	}
 }
 
