@@ -21,6 +21,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
 	sessv1 "github.com/chenhg5/cc-connect/core/session"
+	"github.com/chenhg5/cc-connect/core/hexmem"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -673,6 +674,22 @@ func main() {
 			slog.Info("v1 sessions enabled", "project", proj.Name, "pins_path", pinsPath)
 		} else {
 			slog.Debug("v1 sessions disabled (CC_CONNECT_SESSIONS_V1 not set to 1)", "project", proj.Name)
+		}
+
+		// Wire hex memory client when CC_CONNECT_HEX_MEMORY=1.
+		// Disabled by default; operators opt in by setting the env var.
+		if os.Getenv("CC_CONNECT_HEX_MEMORY") == "1" {
+			hexRoot := os.Getenv("CC_HEX_ROOT")
+			if hexRoot == "" {
+				hexRoot = "/Users/sagarsingh/hex"
+			}
+			hexCfg := hexmem.Config{
+				HexRoot: hexRoot,
+				Enabled: true,
+			}
+			hexClient := hexmem.NewClient(hexCfg)
+			engine.SetHexClient(hexClient)
+			slog.Info("hex memory enabled", "project", proj.Name, "hex_root", hexCfg.HexRoot)
 		}
 
 		// Wire SetMessageShortcutHandler for platforms that support message shortcuts.

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultHexRoot = "/Users/sagarsingh/hex"
+	defaultHexRoot = ""
 	saveTimeout    = 10 * time.Second
 	scriptSubpath  = ".hex/skills/memory/scripts"
 )
@@ -67,14 +67,17 @@ func NewClient(cfg Config) *Client {
 	if cfg.HexRoot == "" {
 		if root := os.Getenv("CC_HEX_ROOT"); root != "" {
 			cfg.HexRoot = root
-		} else {
-			cfg.HexRoot = defaultHexRoot
 		}
 	}
 
 	c := &Client{cfg: cfg, exec: defaultExec}
 
 	if !cfg.Enabled {
+		return c
+	}
+
+	if cfg.HexRoot == "" {
+		slog.Info("hexmem: hex disabled: no HexRoot configured")
 		return c
 	}
 
@@ -109,7 +112,7 @@ func (c *Client) Save(ctx context.Context, item MemoryItem) {
 	}
 	tags := EncodeTags(item)
 	go func() {
-		saveCtx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+		saveCtx, cancel := context.WithTimeout(ctx, saveTimeout)
 		defer cancel()
 		if _, err := c.exec(saveCtx, "python3", c.savePath, item.Content, "--tags", tags, "--source", item.Source); err != nil {
 			slog.Warn("hexmem: save failed", "err", err, "source", item.Source)
@@ -118,14 +121,15 @@ func (c *Client) Save(ctx context.Context, item MemoryItem) {
 }
 
 // Search runs memory_search.py --compact and returns up to top results.
-// Returns an empty slice on error (fail-open).
+// Returns nil, nil on script error (fail-open) — hex is a best-effort enhancement.
 func (c *Client) Search(ctx context.Context, query string, top int) ([]SearchResult, error) {
 	if !c.enabled {
 		return nil, nil
 	}
 	out, err := c.exec(ctx, "python3", c.srchPath, "--compact", "--top", fmt.Sprintf("%d", top), query)
 	if err != nil {
-		return nil, fmt.Errorf("hexmem: search failed: %w", err)
+		slog.Warn("hexmem: search failed", "err", err)
+		return nil, nil
 	}
 	return parseCompact(string(out)), nil
 }

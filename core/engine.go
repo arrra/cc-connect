@@ -11277,7 +11277,8 @@ func (e *Engine) SetV1Store(store sessv1.SessionStore) {
 }
 
 // SetHexClient installs the hex memory client on the engine, activating session
-// summary writes and /promote command. Called during startup when CC_CONNECT_HEX_MEMORY=1.
+// summary writes and /promote command. main.go wires this after Engine + platform
+// construction, before Engine.Start, when CC_CONNECT_HEX_MEMORY=1.
 func (e *Engine) SetHexClient(client *hexmem.Client) {
 	e.hexClient = client
 }
@@ -11600,7 +11601,9 @@ func (e *Engine) cmdRecall(p Platform, msg *Message, args []string) {
 		return
 	}
 	query := strings.Join(args, " ")
-	results, err := e.hexClient.Search(e.ctx, query, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	results, err := e.hexClient.Search(ctx, query, 3)
 	if err != nil || len(results) == 0 {
 		e.reply(p, msg.ReplyCtx, "No hex memories found for: "+query)
 		return

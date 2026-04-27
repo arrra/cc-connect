@@ -3,6 +3,7 @@ package hexmem
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -216,12 +217,50 @@ func TestSearch_ScriptError(t *testing.T) {
 		exec:     mock,
 	}
 
+	// Search is fail-open: returns nil, nil on script error.
 	results, err := c.Search(context.Background(), "query", 3)
-	if err == nil {
-		t.Fatal("expected error from Search when script fails")
+	if err != nil {
+		t.Fatalf("expected no error from fail-open Search, got: %v", err)
 	}
-	if len(results) != 0 {
-		t.Fatalf("expected empty results on error, got %v", results)
+	if results != nil {
+		t.Fatalf("expected nil results on script error, got %v", results)
+	}
+}
+
+func TestParseCompact_GoldenSample(t *testing.T) {
+	// synthetic but format-faithful sample of memory_search.py --compact output
+	data, err := os.ReadFile("testdata/compact_sample.txt")
+	if err != nil {
+		t.Fatalf("failed to read golden sample: %v", err)
+	}
+
+	results := parseCompact(string(data))
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d: %v", len(results), results)
+	}
+
+	want := []SearchResult{
+		{
+			Source:  "projects/chief-of-staff/context.md",
+			Tags:    "Chief of Staff Role",
+			Content: "Coordinates executive workflows, manages priorities, and triages incoming requests.",
+		},
+		{
+			Source:  "projects/chief-of-staff/rituals.md",
+			Tags:    "Weekly Rituals",
+			Content: "Monday alignment meeting, Friday retrospective, async updates via Slack.",
+		},
+	}
+	for i, w := range want {
+		if results[i].Source != w.Source {
+			t.Errorf("results[%d].Source: want %q, got %q", i, w.Source, results[i].Source)
+		}
+		if results[i].Tags != w.Tags {
+			t.Errorf("results[%d].Tags: want %q, got %q", i, w.Tags, results[i].Tags)
+		}
+		if results[i].Content != w.Content {
+			t.Errorf("results[%d].Content: want %q, got %q", i, w.Content, results[i].Content)
+		}
 	}
 }
 
