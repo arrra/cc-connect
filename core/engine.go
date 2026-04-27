@@ -2146,15 +2146,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			state.mu.Unlock()
 
 			ws := sessv1.BuildWorkingSet(v1sess, &sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID})
-			if store, ok := e.v1Store.(*sessv1.InMemorySessionStore); ok {
-				snap := sessv1.TurnSnapshot{
-					UserMessage: sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID},
-					TurnNum:     v1sess.TurnCount,
-					Tier:        sessv1.TierActive,
-				}
-				if err := store.AppendTurn(msg.SessionKey, snap); err != nil {
-					slog.Warn("v1: AppendTurn failed", "key", msg.SessionKey, "err", err)
-				}
+			snap := sessv1.TurnSnapshot{
+				UserMessage: sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID},
+				TurnNum:     v1sess.TurnCount,
+				Tier:        sessv1.TierActive,
+			}
+			if err := e.v1Store.AppendTurn(msg.SessionKey, snap); err != nil {
+				slog.Warn("v1: append turn failed", "key", msg.SessionKey, "err", err)
 			}
 			rec := sessv1.BuildTurnLog(
 				v1sess,
@@ -11491,9 +11489,9 @@ func (e *Engine) prependV1Context(sessionKey, msgContent, msgTS, prompt string) 
 	if channelKey, hasThread := sessv1.ChannelKeyFromSessionKey(sessionKey); hasThread {
 		if channelPins, err := e.v1Store.GetPinnedByKey(channelKey); err == nil && len(channelPins) > 0 {
 			merged := sessv1.MergeInheritedPins(channelPins, sess.Pinned)
-			copy := *sess
-			copy.Pinned = merged
-			sessForWS = &copy
+			sessCopy := *sess
+			sessCopy.Pinned = merged
+			sessForWS = &sessCopy
 		}
 	}
 
