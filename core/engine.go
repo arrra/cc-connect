@@ -11393,6 +11393,18 @@ func (e *Engine) cmdForget(p Platform, msg *Message, args []string) {
 		}
 		switch len(matches) {
 		case 0:
+			// Check if the query matches an inherited channel pin to give a helpful error.
+			if channelKey, hasThread := sessv1.ChannelKeyFromSessionKey(msg.SessionKey); hasThread {
+				if channelPins, cerr := e.v1Store.GetPinnedByKey(channelKey); cerr == nil {
+					query := strings.ToLower(strings.Join(args, " "))
+					for _, cp := range channelPins {
+						if strings.Contains(strings.ToLower(cp.Text), query) {
+							e.reply(p, msg.ReplyCtx, "That pin was inherited from the channel session — use /forget from the channel level to remove it.")
+							return
+						}
+					}
+				}
+			}
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin matching %q. Use /context to list pins.", strings.Join(args, " ")))
 			return
 		case 1:
@@ -11474,8 +11486,19 @@ func (e *Engine) prependV1Context(sessionKey, msgContent, msgTS, prompt string) 
 		return prompt
 	}
 
+	// Merge inherited channel pins when this is a thread-scoped session.
+	sessForWS := sess
+	if channelKey, hasThread := sessv1.ChannelKeyFromSessionKey(sessionKey); hasThread {
+		if channelPins, err := e.v1Store.GetPinnedByKey(channelKey); err == nil && len(channelPins) > 0 {
+			merged := sessv1.MergeInheritedPins(channelPins, sess.Pinned)
+			copy := *sess
+			copy.Pinned = merged
+			sessForWS = &copy
+		}
+	}
+
 	recentMsg := &sessv1.UserMessage{Text: msgContent, Ts: msgTS}
-	ws := sessv1.BuildWorkingSet(sess, recentMsg)
+	ws := sessv1.BuildWorkingSet(sessForWS, recentMsg)
 
 	ctx, err := sessv1.MarshalSystemContext(ws)
 	if err != nil {
