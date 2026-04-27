@@ -2146,15 +2146,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			state.mu.Unlock()
 
 			ws := sessv1.BuildWorkingSet(v1sess, &sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID})
-			if store, ok := e.v1Store.(*sessv1.InMemorySessionStore); ok {
-				snap := sessv1.TurnSnapshot{
-					UserMessage: sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID},
-					TurnNum:     v1sess.TurnCount,
-					Tier:        sessv1.TierActive,
-				}
-				if err := store.AppendTurn(msg.SessionKey, snap); err != nil {
-					slog.Warn("v1: AppendTurn failed", "key", msg.SessionKey, "err", err)
-				}
+			snap := sessv1.TurnSnapshot{
+				UserMessage: sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID},
+				TurnNum:     v1sess.TurnCount,
+				Tier:        sessv1.TierActive,
+			}
+			if err := e.v1Store.AppendTurn(msg.SessionKey, snap); err != nil {
+				slog.Warn("v1: AppendTurn failed", "key", msg.SessionKey, "err", err)
 			}
 			rec := sessv1.BuildTurnLog(
 				v1sess,

@@ -39,4 +39,7 @@ type SessionStore interface {
 	// GetPinnedByKey returns a defensive copy of the pins for the given session key.
 	// Returns nil, nil if no session or saved pins exist for that key.
 	GetPinnedByKey(key string) ([]PinnedItem, error)
+	// AppendTurn appends snap to the rolling turn history for sessionKey.
+	// Returns ErrSessionNotFound if no session exists for the key.
+	AppendTurn(sessionKey string, snap TurnSnapshot) error
 }
