@@ -324,6 +324,24 @@ reset_on_idle_mins = 60
 ```
 
 
+### 🧵 v1 Context Management (Sessions)
+
+Enable thread-scoped sessions with bounded working-set and `/pin` persistence:
+
+```bash
+CC_CONNECT_SESSIONS_V1=1 cc-connect
+```
+
+Each Slack thread or DM becomes an independent session. Only the root objective, the most recent user message, the most recent tool result, and pinned items are sent to the agent each turn — everything else is evicted. Sessions expire after 30 minutes idle.
+
+```
+/pin <text>    Pin text to survive context eviction
+/pin           (replying to a message) Pin that message's text — engine-only in v1; reachable in v2 via Slack message shortcut
+```
+
+See [docs/sessions.md](docs/sessions.md) for full documentation including pin persistence, restart behavior, and known v1 limitations.
+
+
 ### 🛡️ OS-User Isolation (`run_as_user`)
 
 On Linux/macOS, a project can spawn its agent under a different Unix

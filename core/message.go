@@ -154,6 +154,7 @@ type Message struct {
 	ReplyCtx     any             // platform-specific context needed for replying
 	FromVoice    bool            // true if message originated from voice transcription
 	ModeOverride string          // if set, temporarily override agent permission mode for this message
+	ParentText   string          // text of the parent message being replied to (set by platform when available)
 }
 
 // EventType distinguishes different kinds of agent output.

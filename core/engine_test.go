@@ -9699,3 +9699,26 @@ type stubPlatformWithObserve struct {
 func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
 	return nil
 }
+
+func TestDeriveRootObjective_StripsAndTruncates(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"strips mention", "<@U001> hello there", "hello there"},
+		{"empty after mention", "<@U001> ", ""},
+		{"no mention", "hello", "hello"},
+		{"truncates to 500", "<@U001> " + strings.Repeat("a", 600), strings.Repeat("a", 500)},
+		{"trims whitespace around mention", "  <@U001>  spaces around  ", "spaces around"},
+		{"empty input", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deriveRootObjective(tc.input)
+			if got != tc.want {
+				t.Errorf("deriveRootObjective(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
