@@ -20,8 +20,6 @@ import (
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
-	sessv1 "github.com/chenhg5/cc-connect/core/session"
-	"github.com/chenhg5/cc-connect/core/hexmem"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -658,47 +656,15 @@ func main() {
 			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
-		// Wire v1 session management when CC_CONNECT_SESSIONS_V1=1.
-		// Default is OFF so existing deployments are unaffected until operators
-		// explicitly opt in by setting the env var.
-		if os.Getenv("CC_CONNECT_SESSIONS_V1") == "1" {
-			pinsPath := filepath.Join(cfg.DataDir, "pins.json")
-			pinStore := sessv1.NewPinStore(pinsPath)
-			savedPins, err := pinStore.Load()
-			if err != nil {
-				slog.Warn("v1 sessions: failed to load saved pins, starting with empty pins", "path", pinsPath, "err", err)
-				savedPins = nil
-			}
-			store := sessv1.NewInMemorySessionStore(pinStore, savedPins)
-			engine.SetV1Store(store)
-			slog.Info("v1 sessions enabled", "project", proj.Name, "pins_path", pinsPath)
-		} else {
-			slog.Debug("v1 sessions disabled (CC_CONNECT_SESSIONS_V1 not set to 1)", "project", proj.Name)
+		if err := core.WireV1Store(engine, proj.Name, cfg.DataDir); err != nil {
+			slog.Warn("v1 store wiring failed", "err", err)
 		}
 
-		// Wire hex memory client when CC_CONNECT_HEX_MEMORY=1.
-		// Disabled by default; operators opt in by setting the env var.
-		if os.Getenv("CC_CONNECT_HEX_MEMORY") == "1" {
-			hexRoot := os.Getenv("CC_HEX_ROOT")
-			if hexRoot == "" {
-				hexRoot = "/Users/sagarsingh/hex"
-			}
-			hexCfg := hexmem.Config{
-				HexRoot: hexRoot,
-				Enabled: true,
-			}
-			hexClient := hexmem.NewClient(hexCfg)
-			engine.SetHexClient(hexClient)
-			slog.Info("hex memory enabled", "project", proj.Name, "hex_root", hexCfg.HexRoot)
+		if err := core.WireHexClient(engine, proj.Name); err != nil {
+			slog.Warn("hex client wiring failed", "err", err)
 		}
 
-		// Wire SetMessageShortcutHandler for platforms that support message shortcuts.
-		for _, p := range platforms {
-			if mss, ok := p.(core.MessageShortcutSetter); ok {
-				mss.SetMessageShortcutHandler(engine.HandleMessageShortcut)
-				slog.Debug("v2: wired shortcut handler", "project", proj.Name)
-			}
-		}
+		core.WireShortcutHandlers(engine, proj.Name, platforms)
 
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
