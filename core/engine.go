@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	sessv1 "github.com/chenhg5/cc-connect/core/session"
+	"github.com/chenhg5/cc-connect/core/hexmem"
 )
 
 const maxPlatformMessageLen = 4000
@@ -246,6 +247,10 @@ type Engine struct {
 
 	// v1 session management — non-nil only when CC_CONNECT_SESSIONS_V1=1 (wired in t-8).
 	v1Store sessv1.SessionStore
+
+	// hexClient shells out to hex memory CLI scripts. Non-nil only when CC_HEX_ROOT or
+	// default hex path is present and CC_CONNECT_HEX_MEMORY=1 (wired via SetHexClient).
+	hexClient *hexmem.Client
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -2118,6 +2123,15 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if e.v1Store != nil {
 		promptContent = e.prependV1Context(msg.SessionKey, msg.Content, msg.MessageID, promptContent)
 	}
+	// Hex auto-recall: on the first turn of a session, prepend relevant hex memories.
+	// TurnCount==0 before IncrementTurn fires, so this is exactly the first message.
+	if e.hexClient != nil && e.hexClient.Enabled() && e.v1Store != nil {
+		if sess, sessErr := e.v1Store.GetByKey(msg.SessionKey); sessErr == nil && sess != nil && sess.TurnCount == 0 {
+			if hexResults, _ := e.hexClient.Search(e.ctx, hexmem.ChannelID(msg.SessionKey), 5); len(hexResults) > 0 {
+				promptContent = hexRecallBlock(hexResults) + promptContent
+			}
+		}
+	}
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -2504,6 +2518,43 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	}
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
+
+	// Fire-and-forget: persist a session summary to hex memory so future sessions
+	// can recall prior context. Reads session state before the store cleans it up.
+	e.hexSaveSessionSummary(sessionKey)
+}
+
+// hexSaveSessionSummary writes a session summary to hex memory on termination.
+// It is a no-op when hexClient is disabled or v1Store is unavailable.
+func (e *Engine) hexSaveSessionSummary(sessionKey string) {
+	if e.hexClient == nil || !e.hexClient.Enabled() || e.v1Store == nil {
+		return
+	}
+	sess, err := e.v1Store.GetByKey(sessionKey)
+	if err != nil || sess == nil {
+		return
+	}
+
+	objective := sess.RootObjective
+	const maxObj = 200
+	if len(objective) > maxObj {
+		objective = objective[:maxObj]
+	}
+
+	content := fmt.Sprintf(
+		"[cc-connect session summary] %s | root_objective: %s | turns: %d | pins: %d | corrections: %d",
+		sessionKey, objective, sess.TurnCount, len(sess.Pinned), sess.CorrectionCount,
+	)
+
+	channelID := hexmem.ChannelID(sessionKey)
+	e.hexClient.Save(context.Background(), hexmem.MemoryItem{
+		Content:    content,
+		Tags:       "cc-connect,session-summary," + channelID,
+		Source:     "cc-connect_session_" + sess.SessionID,
+		Type:       "fact",
+		ScopePath:  hexmem.ScopePathFromSessionKey(sessionKey),
+		Provenance: "tool_output",
+	})
 }
 
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
@@ -3341,6 +3392,7 @@ var builtinCommands = []struct {
 	{[]string{"context"}, "context"},
 	{[]string{"forget"}, "forget"},
 	{[]string{"reset-scope"}, "reset-scope"},
+	{[]string{"promote"}, "promote"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3566,6 +3618,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdForget(p, msg, args)
 	case "reset-scope":
 		e.cmdResetScope(p, msg)
+	case "promote":
+		e.cmdPromote(p, msg, args)
+	case "recall":
+		e.cmdRecall(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -11220,6 +11276,12 @@ func (e *Engine) SetV1Store(store sessv1.SessionStore) {
 	e.v1Store = store
 }
 
+// SetHexClient installs the hex memory client on the engine, activating session
+// summary writes and /promote command. Called during startup when CC_CONNECT_HEX_MEMORY=1.
+func (e *Engine) SetHexClient(client *hexmem.Client) {
+	e.hexClient = client
+}
+
 // truncatePinText caps message text for storage as a pin.
 // 2000 chars — higher than deriveRootObjective's 500 since pins are content, not objectives.
 func truncatePinText(text string) string {
@@ -11448,6 +11510,125 @@ func (e *Engine) cmdForget(p Platform, msg *Message, args []string) {
 		truncated = truncated[:80] + "…"
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf("🗑 Removed pin: %q", truncated))
+}
+
+// cmdPromote handles /promote <number|text-snippet>. It resolves a pin by index or
+// substring match (mirroring /forget resolution) and persists it to hex durable memory
+// via hexClient.Save. The pin remains in the session; it is only promoted to hex.
+func (e *Engine) cmdPromote(p Platform, msg *Message, args []string) {
+	if e.v1Store == nil {
+		e.reply(p, msg.ReplyCtx, "Sessions feature disabled.")
+		return
+	}
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /promote <number> or /promote <text-snippet>")
+		return
+	}
+	sess, err := e.v1Store.GetByKey(msg.SessionKey)
+	if err != nil || sess == nil {
+		e.reply(p, msg.ReplyCtx, "No active session for this thread.")
+		return
+	}
+	if len(sess.Pinned) == 0 {
+		e.reply(p, msg.ReplyCtx, "No pins to promote. Use /pin to add pins first.")
+		return
+	}
+	var idx int
+	if n, convErr := strconv.Atoi(args[0]); convErr == nil {
+		if n < 1 || n > len(sess.Pinned) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin #%d. Use /context to list pins.", n))
+			return
+		}
+		idx = n - 1
+	} else {
+		query := strings.ToLower(strings.Join(args, " "))
+		var matches []int
+		for i, pin := range sess.Pinned {
+			if strings.Contains(strings.ToLower(pin.Text), query) {
+				matches = append(matches, i)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin matching %q. Use /context to list pins.", strings.Join(args, " ")))
+			return
+		case 1:
+			idx = matches[0]
+		default:
+			var b strings.Builder
+			b.WriteString("Multiple matches:\n")
+			for _, mi := range matches {
+				truncated := sess.Pinned[mi].Text
+				if len(truncated) > 80 {
+					truncated = truncated[:80] + "…"
+				}
+				b.WriteString(fmt.Sprintf("  %d. %s\n", mi+1, truncated))
+			}
+			b.WriteString("Use /promote <number> to pick one.")
+			e.reply(p, msg.ReplyCtx, b.String())
+			return
+		}
+	}
+	pinText := sess.Pinned[idx].Text
+	if e.hexClient != nil && e.hexClient.Enabled() {
+		channelID := hexmem.ChannelID(msg.SessionKey)
+		e.hexClient.Save(context.Background(), hexmem.MemoryItem{
+			Content:    pinText,
+			Tags:       "cc-connect,promoted-pin," + channelID,
+			Source:     "cc-connect_session_" + sess.SessionID,
+			Type:       "fact",
+			ScopePath:  hexmem.ScopePathFromSessionKey(msg.SessionKey),
+			Provenance: "user_instruction",
+		})
+	}
+	truncated := pinText
+	if len(truncated) > 80 {
+		truncated = truncated[:80] + "…"
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("Promoted to hex memory: %s", truncated))
+}
+
+// cmdRecall handles /recall <query>. It queries hex memory and returns matching
+// results as an ephemeral reply. The user can then /pin <N> to elevate any result.
+func (e *Engine) cmdRecall(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /recall <query>")
+		return
+	}
+	if e.hexClient == nil || !e.hexClient.Enabled() {
+		e.reply(p, msg.ReplyCtx, "Hex memory is not enabled.")
+		return
+	}
+	query := strings.Join(args, " ")
+	results, err := e.hexClient.Search(e.ctx, query, 3)
+	if err != nil || len(results) == 0 {
+		e.reply(p, msg.ReplyCtx, "No hex memories found for: "+query)
+		return
+	}
+	var b strings.Builder
+	for _, r := range results {
+		text := r.Content
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		b.WriteString(fmt.Sprintf("• %s (source: %s)\n", text, r.Source))
+	}
+	e.reply(p, msg.ReplyCtx, strings.TrimRight(b.String(), "\n"))
+}
+
+// hexRecallBlock formats hex search results as a context block prepended to the prompt.
+func hexRecallBlock(results []hexmem.SearchResult) string {
+	var b strings.Builder
+	b.WriteString("<cc-connect:hex_memory>\n")
+	for _, r := range results {
+		text := r.Content
+		if len(text) > 300 {
+			text = text[:300]
+		}
+		b.WriteString("[hex-recall] " + text + " (source: " + r.Source + ")\n")
+	}
+	b.WriteString("</cc-connect:hex_memory>\n\n")
+	return b.String()
 }
 
 // cmdResetScope handles the /reset-scope slash command. It clears all pins and
