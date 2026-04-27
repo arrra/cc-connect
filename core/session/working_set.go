@@ -1,6 +1,9 @@
 package session
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // BuildWorkingSet constructs a fresh WorkingSet for the current turn.
 // recentMsg is the user message that just arrived.

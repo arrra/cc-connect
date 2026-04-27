@@ -30,4 +30,13 @@ type SessionStore interface {
 	// SetWorkingSet atomically replaces the session's WorkingSet.
 	// Returns a shallow copy of the updated session, or (nil, nil) if no session exists.
 	SetWorkingSet(sessionKey string, ws *WorkingSet) (*Session, error)
+	// RemovePin removes the pin at 0-based idx from the session's Pinned slice.
+	// Returns ErrSessionNotFound if no session exists, ErrPinNotFound if idx is out of range.
+	RemovePin(sessionKey string, idx int) (*Session, error)
+	// ResetScope clears Pinned and RootObjective without terminating the session.
+	// Returns ErrSessionNotFound if no session exists.
+	ResetScope(sessionKey string) (*Session, error)
+	// GetPinnedByKey returns a defensive copy of the pins for the given session key.
+	// Returns nil, nil if no session or saved pins exist for that key.
+	GetPinnedByKey(key string) ([]PinnedItem, error)
 }

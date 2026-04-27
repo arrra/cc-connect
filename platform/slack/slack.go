@@ -148,8 +148,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				var sessionKey string
 				if p.shareSessionInChannel {
 					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
+				} else if ev.ThreadTimeStamp != "" {
+					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.ThreadTimeStamp)
 				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
 				}
 
 				var shareFiles []slackevents.File
@@ -200,8 +202,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				var sessionKey string
 				if p.shareSessionInChannel {
 					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
+				} else if ev.ThreadTimeStamp != "" {
+					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.ThreadTimeStamp)
 				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
 				}
 				ts := ev.TimeStamp
 
@@ -246,11 +250,26 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			content += " " + cmd.Text
 		}
 
+		// Slack slash commands don't include thread context in the parsed struct,
+		// but the raw Socket Mode payload does carry thread_ts when invoked in a thread.
+		// Extract it before deriving the session key so thread-scoped commands key correctly.
+		var slashThreadTS string
+		if evt.Request != nil {
+			var raw struct {
+				ThreadTs string `json:"thread_ts"`
+			}
+			if err := json.Unmarshal(evt.Request.Payload, &raw); err == nil {
+				slashThreadTS = raw.ThreadTs
+			}
+		}
+
 		var sessionKey string
 		if p.shareSessionInChannel {
 			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
+		} else if slashThreadTS != "" {
+			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, slashThreadTS)
 		} else {
-			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, cmd.UserID)
+			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
 		}
 
 		msg := &core.Message{
@@ -260,19 +279,11 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			ReplyCtx: replyContext{channel: cmd.ChannelID},
 		}
 
-		// Slack slash commands don't include thread context in the parsed struct,
-		// but the raw Socket Mode payload does carry thread_ts when invoked in a thread.
-		// Extract it and fetch the root message text for /pin reply-to support.
-		if evt.Request != nil {
-			var raw struct {
-				ThreadTs string `json:"thread_ts"`
-			}
-			if err := json.Unmarshal(evt.Request.Payload, &raw); err == nil && raw.ThreadTs != "" {
-				if parentText, err := p.fetchThreadRootText(context.Background(), cmd.ChannelID, raw.ThreadTs); err == nil {
-					msg.ParentText = parentText
-				} else {
-					slog.Debug("slack: fetch thread root for /pin", "err", err)
-				}
+		if slashThreadTS != "" {
+			if parentText, err := p.fetchThreadRootText(context.Background(), cmd.ChannelID, slashThreadTS); err == nil {
+				msg.ParentText = parentText
+			} else {
+				slog.Debug("slack: fetch thread root for /pin", "err", err)
 			}
 		}
 
@@ -301,15 +312,17 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			return
 		}
 
+		msgText := callback.Message.Text
+		threadTS := callback.Message.ThreadTimestamp
+
 		var sessionKey string
 		if p.shareSessionInChannel {
 			sessionKey = fmt.Sprintf("slack:%s", callback.Channel.ID)
+		} else if threadTS != "" {
+			sessionKey = fmt.Sprintf("slack:%s:%s", callback.Channel.ID, threadTS)
 		} else {
-			sessionKey = fmt.Sprintf("slack:%s:%s", callback.Channel.ID, callback.User.ID)
+			sessionKey = fmt.Sprintf("slack:%s", callback.Channel.ID)
 		}
-
-		msgText := callback.Message.Text
-		threadTS := callback.Message.ThreadTimestamp
 
 		slog.Debug("slack: message shortcut", "callback_id", callback.CallbackID, "user", callback.User.ID, "channel", callback.Channel.ID)
 
@@ -557,7 +570,7 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// slack:{channel}:{user}
+	// slack:{channel} or slack:{channel}:{thread_ts}
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != "slack" {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)

@@ -2146,6 +2146,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			state.mu.Unlock()
 
 			ws := sessv1.BuildWorkingSet(v1sess, &sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID})
+			if store, ok := e.v1Store.(*sessv1.InMemorySessionStore); ok {
+				snap := sessv1.TurnSnapshot{
+					UserMessage: sessv1.UserMessage{Text: msg.Content, Ts: msg.MessageID},
+					TurnNum:     v1sess.TurnCount,
+					Tier:        sessv1.TierActive,
+				}
+				if err := store.AppendTurn(msg.SessionKey, snap); err != nil {
+					slog.Warn("v1: AppendTurn failed", "key", msg.SessionKey, "err", err)
+				}
+			}
 			rec := sessv1.BuildTurnLog(
 				v1sess,
 				&ws,
@@ -3324,6 +3334,9 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"pin"}, "pin"},
+	{[]string{"context"}, "context"},
+	{[]string{"forget"}, "forget"},
+	{[]string{"reset-scope"}, "reset-scope"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
@@ -3543,6 +3556,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "pin":
 		e.cmdPin(p, msg, args)
+	case "context":
+		e.cmdContext(p, msg)
+	case "forget":
+		e.cmdForget(p, msg, args)
+	case "reset-scope":
+		e.cmdResetScope(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
@@ -11295,6 +11314,142 @@ func (e *Engine) cmdPin(p Platform, msg *Message, args []string) {
 		truncated = truncated[:80] + "…"
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf("📌 Pinned: \"%s\"", truncated))
+}
+
+// cmdContext handles the /context slash command. It displays the current
+// working set (objective, pins, last message, turn count) as an ephemeral reply.
+func (e *Engine) cmdContext(p Platform, msg *Message) {
+	if e.v1Store == nil {
+		e.reply(p, msg.ReplyCtx, "Sessions feature disabled.")
+		return
+	}
+	sess, err := e.v1Store.GetByKey(msg.SessionKey)
+	if err != nil || sess == nil {
+		e.reply(p, msg.ReplyCtx, "No active session for this thread.")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("*Working set:*\n")
+	if sess.RootObjective != "" {
+		b.WriteString(fmt.Sprintf("*Objective:* %s\n", sess.RootObjective))
+	} else {
+		b.WriteString("*Objective:* (not set)\n")
+	}
+	if len(sess.Pinned) == 0 {
+		b.WriteString("*Pins:* (none)\n")
+	} else {
+		b.WriteString(fmt.Sprintf("*Pins (%d):*\n", len(sess.Pinned)))
+		for i, pin := range sess.Pinned {
+			truncated := pin.Text
+			if len(truncated) > 100 {
+				truncated = truncated[:100] + "…"
+			}
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, truncated))
+		}
+	}
+	if sess.WorkingSet.RecentUserMessage != nil {
+		truncated := sess.WorkingSet.RecentUserMessage.Text
+		if len(truncated) > 80 {
+			truncated = truncated[:80] + "…"
+		}
+		b.WriteString(fmt.Sprintf("*Last message:* %s\n", truncated))
+	}
+	b.WriteString(fmt.Sprintf("*Turns:* %d", sess.TurnCount))
+	e.reply(p, msg.ReplyCtx, b.String())
+}
+
+// cmdForget handles the /forget <id> slash command. It removes a pin by 1-based
+// index or substring match, with disambiguation when multiple pins match.
+func (e *Engine) cmdForget(p Platform, msg *Message, args []string) {
+	if e.v1Store == nil {
+		e.reply(p, msg.ReplyCtx, "Sessions feature disabled.")
+		return
+	}
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /forget <number> or /forget <text-snippet>")
+		return
+	}
+	sess, err := e.v1Store.GetByKey(msg.SessionKey)
+	if err != nil || sess == nil {
+		e.reply(p, msg.ReplyCtx, "No active session for this thread.")
+		return
+	}
+	var idx int
+	if n, convErr := strconv.Atoi(args[0]); convErr == nil {
+		// 1-based index from user → 0-based internal
+		if n < 1 || n > len(sess.Pinned) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin #%d. Use /context to list pins.", n))
+			return
+		}
+		idx = n - 1
+	} else {
+		// Substring match
+		query := strings.ToLower(strings.Join(args, " "))
+		var matches []int
+		for i, pin := range sess.Pinned {
+			if strings.Contains(strings.ToLower(pin.Text), query) {
+				matches = append(matches, i)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin matching %q. Use /context to list pins.", strings.Join(args, " ")))
+			return
+		case 1:
+			idx = matches[0]
+		default:
+			var b strings.Builder
+			b.WriteString("Multiple matches:\n")
+			for _, mi := range matches {
+				truncated := sess.Pinned[mi].Text
+				if len(truncated) > 80 {
+					truncated = truncated[:80] + "…"
+				}
+				b.WriteString(fmt.Sprintf("  %d. %s\n", mi+1, truncated))
+			}
+			b.WriteString("Use /forget <number> to pick one.")
+			e.reply(p, msg.ReplyCtx, b.String())
+			return
+		}
+	}
+	removed := sess.Pinned[idx].Text
+	_, removeErr := e.v1Store.RemovePin(msg.SessionKey, idx)
+	if removeErr != nil {
+		if errors.Is(removeErr, sessv1.ErrSessionNotFound) {
+			e.reply(p, msg.ReplyCtx, "No active session for this thread.")
+		} else if errors.Is(removeErr, sessv1.ErrPinNotFound) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("No pin #%d. Use /context to list pins.", idx+1))
+		} else {
+			e.reply(p, msg.ReplyCtx, "Failed to remove pin.")
+		}
+		return
+	}
+	if err := e.v1Store.SavePins(); err != nil {
+		slog.Warn("v1: /forget: persist pins failed", "key", msg.SessionKey, "err", err)
+	}
+	truncated := removed
+	if len(truncated) > 80 {
+		truncated = truncated[:80] + "…"
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("🗑 Removed pin: %q", truncated))
+}
+
+// cmdResetScope handles the /reset-scope slash command. It clears all pins and
+// the root objective from the session without terminating it.
+func (e *Engine) cmdResetScope(p Platform, msg *Message) {
+	if e.v1Store == nil {
+		e.reply(p, msg.ReplyCtx, "Sessions feature disabled.")
+		return
+	}
+	sess, err := e.v1Store.ResetScope(msg.SessionKey)
+	if err != nil || sess == nil {
+		e.reply(p, msg.ReplyCtx, "No active session for this thread.")
+		return
+	}
+	if err := e.v1Store.SavePins(); err != nil {
+		slog.Warn("v1: /reset-scope: persist pins failed", "key", msg.SessionKey, "err", err)
+	}
+	e.reply(p, msg.ReplyCtx, "🔄 Scope reset. Pins cleared, objective cleared. Session is still active.")
 }
 
 // prependV1Context looks up the v1 session for sessionKey, builds the working
