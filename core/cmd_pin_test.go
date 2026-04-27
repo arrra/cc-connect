@@ -855,3 +855,64 @@ func TestCmdResetScope_NoSession(t *testing.T) {
 		t.Errorf("expected 'No active session', got: %q", sent[0])
 	}
 }
+
+// ── thread session inheritance tests ─────────────────────────────────────────
+
+// TestThreadSessionInheritsChannelPins verifies v1.2b hierarchical pin inheritance:
+// a thread session's working set includes PINNED items from the parent channel session,
+// and /forget on an inherited pin returns the right error instead of silent no-match.
+func TestThreadSessionInheritsChannelPins(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	store := sessv1.NewInMemorySessionStore(nil, nil)
+	e.SetV1Store(store)
+
+	const channelKey = "slack:C001"
+	const threadKey = "slack:C001:1111.2222"
+
+	// Set up channel session with a pinned item.
+	if _, err := store.Spawn(channelKey, "channel objective"); err != nil {
+		t.Fatalf("Spawn channel: %v", err)
+	}
+	if _, err := store.AddPin(channelKey, sessv1.PinnedItem{
+		Text:     "approved vendor: AWS",
+		Source:   "user_explicit",
+		PinnedAt: time.Now(),
+		PinnedBy: "U001",
+	}); err != nil {
+		t.Fatalf("AddPin channel: %v", err)
+	}
+
+	// Set up thread session with no local pins.
+	if _, err := store.Spawn(threadKey, "thread objective"); err != nil {
+		t.Fatalf("Spawn thread: %v", err)
+	}
+
+	// Build working set for thread → should include inherited channel pin.
+	injected := e.prependV1Context(threadKey, "what's the vendor policy?", "1111.3000", "prompt")
+	if !strings.Contains(injected, "approved vendor: AWS") {
+		t.Errorf("thread working set missing inherited channel pin; got:\n%s", injected)
+	}
+
+	// Attempt /forget on the inherited pin from the thread session.
+	p.clearSent()
+	msg := &Message{SessionKey: threadKey, ReplyCtx: "ctx", UserID: "U001"}
+	e.cmdForget(p, msg, []string{"approved vendor: AWS"})
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected a reply from /forget, got none")
+	}
+	if !strings.Contains(sent[0], "inherited from the channel session") {
+		t.Errorf("/forget on inherited pin: expected 'inherited from the channel session', got: %q", sent[0])
+	}
+
+	// Verify the channel pin is still intact (not silently removed).
+	channelPins, err := store.GetPinnedByKey(channelKey)
+	if err != nil {
+		t.Fatalf("GetPinnedByKey: %v", err)
+	}
+	if len(channelPins) != 1 || channelPins[0].Text != "approved vendor: AWS" {
+		t.Errorf("channel pin was modified; got: %v", channelPins)
+	}
+}

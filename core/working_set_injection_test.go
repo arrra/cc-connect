@@ -10,11 +10,12 @@ import (
 )
 
 // TestWorkingSet_InjectedSchemaShape (t-8) verifies the full injection path:
-//   - prependV1Context injects a JSON block with exactly 4 locked fields
+//   - prependV1Context injects a JSON block with exactly 7 fields (v1.3+ shape)
 //   - root_objective is present and correct
 //   - recent_user_message is populated with the current turn's message
 //   - recent_tool_result is null (documented v1 limitation)
 //   - pinned[] contains all pinned items (carry-forward across turns)
+//   - active_turns, optional_items, quarantined_items are present (empty by default)
 //   - Schema has no extra fields (regression guard against silent prompt expansion)
 //
 // "Running a turn" at the engine level means calling prependV1Context, which is the
@@ -60,8 +61,12 @@ func TestWorkingSet_InjectedSchemaShape(t *testing.T) {
 		t.Fatalf("unmarshal context JSON: %v\njson: %s", err, ctx1JSON)
 	}
 
-	// 5. Schema has no extra fields — exactly 4.
-	wantFields := []string{"root_objective", "pinned", "recent_user_message", "recent_tool_result"}
+	// 5. Schema has no extra fields — exactly 7 (v1.3+ shape).
+	wantFields := []string{
+		"root_objective", "pinned", "active_turns",
+		"optional_items", "quarantined_items",
+		"recent_user_message", "recent_tool_result",
+	}
 	if len(ctx1) != len(wantFields) {
 		t.Errorf("turn 1: expected %d top-level fields, got %d: %v", len(wantFields), len(ctx1), fieldKeys(ctx1))
 	}
@@ -161,7 +166,7 @@ func TestWorkingSet_InjectedSchemaShape(t *testing.T) {
 		t.Errorf("turn 2: recent_tool_result = %s, want null (still the v1 limitation, not silently fixed)", ctx2["recent_tool_result"])
 	}
 
-	// Schema still exactly 4 fields on turn 2 (no silent schema expansion).
+	// Schema still exactly 7 fields on turn 2 (no silent schema expansion).
 	if len(ctx2) != len(wantFields) {
 		t.Errorf("turn 2: expected %d fields, got %d: %v", len(wantFields), len(ctx2), fieldKeys(ctx2))
 	}
