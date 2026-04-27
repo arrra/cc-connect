@@ -1,0 +1,11 @@
+============================================================
+ Memory Search: "chief of staff" — 2 results
+============================================================
+
+  [1] projects/chief-of-staff/context.md > Chief of Staff Role  (score: 1.45)
+      Coordinates executive workflows, manages priorities, and triages incoming requests.
+
+  [2] projects/chief-of-staff/rituals.md > Weekly Rituals  (score: 0.92)
+      Monday alignment meeting, Friday retrospective, async updates via Slack.
+
+(Showing top 2. Use --top N to see more.)
