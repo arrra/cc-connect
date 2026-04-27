@@ -125,3 +125,40 @@ func TestInMemorySessionStore_ConcurrentMutation(t *testing.T) {
 		t.Errorf("TurnCount = %d, want %d (lost updates detected)", sess.TurnCount, goroutines)
 	}
 }
+
+func TestRemovePin_DoesNotMutateCallerCopy(t *testing.T) {
+	store := NewInMemorySessionStore(nil, nil)
+	const key = "test-removepin-nomutate"
+
+	if _, err := store.Spawn(key, "root"); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	pins := []PinnedItem{
+		{Text: "pin-0", Source: "user_explicit", PinnedBy: "U001"},
+		{Text: "pin-1", Source: "user_explicit", PinnedBy: "U001"},
+		{Text: "pin-2", Source: "user_explicit", PinnedBy: "U001"},
+	}
+	for _, p := range pins {
+		if _, err := store.AddPin(key, p); err != nil {
+			t.Fatalf("AddPin: %v", err)
+		}
+	}
+
+	sess, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey: %v", err)
+	}
+
+	// Shallow copy — same backing array as sess.Pinned before the fix.
+	copy1 := sess.Pinned
+
+	if _, err := store.RemovePin(key, 0); err != nil {
+		t.Fatalf("RemovePin: %v", err)
+	}
+
+	// copy1[0] must still be the original first pin, not what append shifted in.
+	if copy1[0].Text != "pin-0" {
+		t.Errorf("copy1[0].Text = %q, want %q — RemovePin mutated caller's backing array", copy1[0].Text, "pin-0")
+	}
+}

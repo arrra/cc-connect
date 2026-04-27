@@ -115,8 +115,8 @@ func (s *InMemorySessionStore) IncrementTurn(sessionKey string) (*Session, error
 	}
 	sess.TurnCount++
 	sess.LastActivityTs = time.Now()
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // AddPin atomically appends pin to the session's Pinned slice.
@@ -137,8 +137,8 @@ func (s *InMemorySessionStore) AddPin(sessionKey string, pin PinnedItem) (*Sessi
 		return nil, ErrPinLimitReached
 	}
 	sess.Pinned = append(sess.Pinned, pin)
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // RemovePin removes the pin at 0-based idx from the session's Pinned slice.
@@ -155,9 +155,12 @@ func (s *InMemorySessionStore) RemovePin(sessionKey string, idx int) (*Session, 
 	if idx < 0 || idx >= len(sess.Pinned) {
 		return nil, ErrPinNotFound
 	}
-	sess.Pinned = append(sess.Pinned[:idx], sess.Pinned[idx+1:]...)
-	copy := *sess
-	return &copy, nil
+	newPins := make([]PinnedItem, 0, len(sess.Pinned)-1)
+	newPins = append(newPins, sess.Pinned[:idx]...)
+	newPins = append(newPins, sess.Pinned[idx+1:]...)
+	sess.Pinned = newPins
+	snap := *sess
+	return &snap, nil
 }
 
 // ResetScope clears the session's Pinned slice and RootObjective without terminating it.
@@ -173,8 +176,8 @@ func (s *InMemorySessionStore) ResetScope(sessionKey string) (*Session, error) {
 	}
 	sess.RootObjective = ""
 	sess.Pinned = nil
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // SetWorkingSet atomically replaces the session's WorkingSet.
@@ -190,8 +193,8 @@ func (s *InMemorySessionStore) SetWorkingSet(sessionKey string, ws *WorkingSet) 
 	if ws != nil {
 		sess.WorkingSet = *ws
 	}
-	copy := *sess
-	return &copy, nil
+	snap := *sess
+	return &snap, nil
 }
 
 // Update replaces the stored session with the caller-supplied value.
