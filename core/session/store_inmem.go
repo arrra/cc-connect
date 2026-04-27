@@ -122,13 +122,16 @@ func (s *InMemorySessionStore) IncrementTurn(sessionKey string) (*Session, error
 // AddPin atomically appends pin to the session's Pinned slice.
 // Returns ErrPinLimitReached if the session already holds MaxPinsPerSession pins.
 // Returns a shallow copy of the updated session, or (nil, nil) if no session exists.
+// AddPin appends pin to sessionKey's session.
+// Returns ErrSessionNotFound if no session exists for sessionKey.
+// Returns ErrPinLimitReached if the session already holds MaxPinsPerSession pins.
 func (s *InMemorySessionStore) AddPin(sessionKey string, pin PinnedItem) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	sess, ok := s.sessions[sessionKey]
 	if !ok {
-		return nil, nil
+		return nil, ErrSessionNotFound
 	}
 	if len(sess.Pinned) >= MaxPinsPerSession {
 		return nil, ErrPinLimitReached

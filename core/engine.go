@@ -11216,6 +11216,9 @@ func (e *Engine) HandleMessageShortcut(sessionKey, messageText, userID, threadTS
 		return fmt.Errorf("HandleMessageShortcut: sessions feature disabled — set CC_CONNECT_SESSIONS_V1=1 to enable")
 	}
 
+	// Errors are swallowed intentionally: if SpawnOrAttach fails, AddPin below
+	// either errors clearly via ErrSessionNotFound (no session was created)
+	// OR pins on the pre-existing session. Best-effort spawn; don't block.
 	if _, _, err := e.v1Store.SpawnOrAttach(sessionKey, deriveRootObjective(messageText)); err != nil {
 		slog.Warn("v1: message shortcut: SpawnOrAttach failed", "key", sessionKey, "err", err)
 	}
