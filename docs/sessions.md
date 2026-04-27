@@ -51,3 +51,35 @@ The following are deliberate v1 constraints, not bugs. They are planned for v2/v
 - **Sessions are channel-scoped** — `session_key` is derived as `slack:<channel_id>` (DM) or `slack:<channel_id>:<user_id>` (channel); `thread_ts` is never included. This matches cc-connect's existing one-Claude-per-channel design. v2 may add per-thread session isolation.
 - **`recent_tool_result` always null** — the schema field exists but no code path writes to it in v1. v2 will wire it from the Claude Code invocation result.
 - **Turn log fields always present even when zero** — `hex_retrieval_token_count` and `tool_results_count` are always included in turn log entries with value 0. The schema is locked for v1; v2 will wire actual values from Claude Code invocations.
+
+## Pin via Slack message shortcut (v2)
+
+v2 adds a Slack message shortcut as the thread-reachable entry point for pinning. Right-click any message → **More actions** → **Pin to working set**. This works in main channels and inside threads — it fixes the v1 reply-to-pin limitation where slash commands are blocked inside threads.
+
+### Register the shortcut in your Slack app
+
+**Manual steps at api.slack.com/apps:**
+
+1. Open your app → **Interactivity & Shortcuts**.
+2. Enable **Interactivity** (your Request URL / Socket Mode endpoint must be active).
+3. Under **Shortcuts**, click **Create New Shortcut**.
+4. Select **On messages**, then set:
+   - **Name:** `Pin to working set`
+   - **Short Description:** `Pin this message to the v1 working set for the current session`
+   - **Callback ID:** `pin_message`
+5. Save changes and reinstall the app if prompted.
+
+**YAML manifest snippet** (for apps managed via manifest):
+
+```yaml
+features:
+  shortcuts:
+    - name: Pin to working set
+      type: message
+      callback_id: pin_message
+      description: Pin this message to the v1 working set for the current session
+```
+
+Add this under the top-level `features:` key in your app manifest. If `shortcuts:` already exists, append the entry.
+
+> **Feature flag required:** The message shortcut handler calls `HandleMessageShortcut`, which requires `CC_CONNECT_SESSIONS_V1=1` to be set. Without it, shortcut invocations return an error to the operator log.

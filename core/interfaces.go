@@ -225,6 +225,13 @@ type AsyncRecoverablePlatform interface {
 	SetLifecycleHandler(h PlatformLifecycleHandler)
 }
 
+// MessageShortcutSetter is an optional interface for platforms that support
+// receiving message shortcut interactions (e.g. Slack message actions).
+// Engine.Start calls SetMessageShortcutHandler when the platform implements this.
+type MessageShortcutSetter interface {
+	SetMessageShortcutHandler(fn func(sessionKey, messageText, userID, threadTS string) error)
+}
+
 // MessageHandler is called by platforms when a new message arrives.
 type MessageHandler func(p Platform, msg *Message)
 
