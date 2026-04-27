@@ -98,6 +98,9 @@ type Session struct {
 	WorkingSet     WorkingSet     `json:"working_set"`
 	TurnHistory    []TurnSnapshot `json:"turn_history"`
 	TurnCount      int            `json:"turn_count"`
-	LastActivityTs time.Time      `json:"last_activity_ts"`
+	// CorrectionCount is incremented each turn the user's message is detected as a correction.
+	// Used by Meter v0 to compute correction_rate. Zero value is correct for pre-v1.4 sessions.
+	CorrectionCount int       `json:"correction_count"`
+	LastActivityTs time.Time  `json:"last_activity_ts"`
 	CreatedAt      time.Time      `json:"created_at"`
 }

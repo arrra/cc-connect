@@ -280,6 +280,20 @@ func (s *InMemorySessionStore) GetPinnedByKey(key string) ([]PinnedItem, error) 
 	return nil, nil
 }
 
+// IncrementCorrectionCount increments Session.CorrectionCount for sessionKey.
+// Returns ErrSessionNotFound if the session does not exist.
+func (s *InMemorySessionStore) IncrementCorrectionCount(sessionKey string) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionKey]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	sess.CorrectionCount++
+	cp := *sess
+	return &cp, nil
+}
+
 // collectAllPinsLocked builds a unified map of all pins across savedPins and
 // currently active sessions. Must be called with s.mu held.
 func (s *InMemorySessionStore) collectAllPinsLocked() map[string][]PinnedItem {

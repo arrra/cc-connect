@@ -42,4 +42,7 @@ type SessionStore interface {
 	// AppendTurn records a TurnSnapshot to the session's TurnHistory, capped at MaxTurnHistory.
 	// Returns ErrSessionNotFound if no session exists for sessionKey.
 	AppendTurn(sessionKey string, snap TurnSnapshot) error
+	// IncrementCorrectionCount increments Session.CorrectionCount for sessionKey.
+	// Returns ErrSessionNotFound if the session does not exist.
+	IncrementCorrectionCount(sessionKey string) (*Session, error)
 }

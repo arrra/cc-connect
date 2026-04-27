@@ -2138,6 +2138,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Update v1 session turn count and last-activity after the turn completes,
 	// then emit the structured turn log record for v2 Meter consumption.
 	if e.v1Store != nil {
+		if sessv1.IsCorrection(msg.Content) {
+			if _, err := e.v1Store.IncrementCorrectionCount(msg.SessionKey); err != nil {
+				slog.Warn("v1: increment correction count failed", "key", msg.SessionKey, "err", err)
+			}
+		}
 		if v1sess, err := e.v1Store.IncrementTurn(msg.SessionKey); err == nil && v1sess != nil {
 			state.mu.Lock()
 			inputTok := state.lastTurnInputTokens
@@ -2165,6 +2170,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				time.Since(sendStart).Milliseconds(),
 			)
 			sessv1.EmitTurnLog(rec)
+			sessv1.EmitMeterLog(sessv1.BuildMeterRecord(v1sess, &ws))
 		}
 	}
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
