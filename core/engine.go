@@ -2123,15 +2123,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if e.v1Store != nil {
 		promptContent = e.prependV1Context(msg.SessionKey, msg.Content, msg.MessageID, promptContent)
 	}
-	// Hex auto-recall: on the first turn of a session, prepend relevant hex memories.
-	// TurnCount==0 before IncrementTurn fires, so this is exactly the first message.
-	if e.hexClient != nil && e.hexClient.Enabled() && e.v1Store != nil {
-		if sess, sessErr := e.v1Store.GetByKey(msg.SessionKey); sessErr == nil && sess != nil && sess.TurnCount == 0 {
-			if hexResults, _ := e.hexClient.Search(e.ctx, hexmem.ChannelID(msg.SessionKey), 5); len(hexResults) > 0 {
-				promptContent = hexRecallBlock(hexResults) + promptContent
-			}
-		}
-	}
+	promptContent = e.applyAutoRecall(msg.SessionKey, promptContent)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -11633,6 +11625,24 @@ func (e *Engine) cmdRecall(p Platform, msg *Message, args []string) {
 		b.WriteString(fmt.Sprintf("• %s (source: %s)\n", text, r.Source))
 	}
 	e.reply(p, msg.ReplyCtx, strings.TrimRight(b.String(), "\n"))
+}
+
+// applyAutoRecall prepends a hex-memory recall block to promptContent on the first
+// turn of a session (TurnCount==0). Returns promptContent unchanged when hex is
+// disabled, no session exists, or this is not the first turn.
+func (e *Engine) applyAutoRecall(sessionKey, promptContent string) string {
+	if e.hexClient == nil || !e.hexClient.Enabled() || e.v1Store == nil {
+		return promptContent
+	}
+	sess, sessErr := e.v1Store.GetByKey(sessionKey)
+	if sessErr != nil || sess == nil || sess.TurnCount != 0 {
+		return promptContent
+	}
+	hexResults, _ := e.hexClient.Search(e.ctx, hexmem.ChannelID(sessionKey), 5)
+	if len(hexResults) > 0 {
+		return hexRecallBlock(hexResults) + promptContent
+	}
+	return promptContent
 }
 
 // hexRecallBlock formats hex search results as a context block prepended to the prompt.
