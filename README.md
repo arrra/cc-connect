@@ -336,7 +336,7 @@ Each Slack thread or DM becomes an independent session. Only the root objective,
 
 ```
 /pin <text>    Pin text to survive context eviction
-/pin           (replying to a message) Pin that message's text
+/pin           (replying to a message) Pin that message's text — engine-only in v1; reachable in v2 via Slack message shortcut
 ```
 
 See [docs/sessions.md](docs/sessions.md) for full documentation including pin persistence, restart behavior, and known v1 limitations.

@@ -11208,6 +11208,10 @@ func (e *Engine) cmdPin(p Platform, msg *Message, args []string) {
 
 	text := strings.TrimSpace(strings.Join(args, " "))
 	pinnedVia := ""
+	// v1 LIMITATION: this branch is unreachable from the Slack UI — Slack does
+	// not allow slash commands inside threads. The code is correct and
+	// integration-tested (TestCmdPin_ReplyTo_*); v2 will replace the trigger
+	// with a Slack message shortcut. See docs/sessions.md "Known v1 Limitations".
 	if text == "" {
 		if msg.ParentText == "" {
 			e.reply(p, msg.ReplyCtx, "Usage: /pin <text> OR reply to a message and run /pin")
