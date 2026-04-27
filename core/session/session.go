@@ -14,6 +14,10 @@ const MaxPinsPerSession = 20
 // MaxPinsPerSession pins.
 var ErrPinLimitReached = errors.New("pin limit reached")
 
+// ErrSessionNotFound is returned by store operations that require an existing
+// session when no session exists for the given key.
+var ErrSessionNotFound = errors.New("session not found")
+
 // PinnedItem is a single item pinned by the user to survive eviction.
 type PinnedItem struct {
 	Text      string    `json:"text"`

@@ -11197,6 +11197,51 @@ func (e *Engine) SetV1Store(store sessv1.SessionStore) {
 	e.v1Store = store
 }
 
+// truncatePinText caps message text for storage as a pin.
+// 2000 chars — higher than deriveRootObjective's 500 since pins are content, not objectives.
+func truncatePinText(text string) string {
+	const maxLen = 2000
+	if len(text) > maxLen {
+		return text[:maxLen]
+	}
+	return text
+}
+
+// HandleMessageShortcut pins a specific message text via the Slack message shortcut.
+// sessionKey and userID come from the interaction payload; threadTS is empty for
+// channel-level (non-thread) invocations. Returns sessv1.ErrPinLimitReached unwrapped
+// so the platform layer can surface a user-facing cap message.
+func (e *Engine) HandleMessageShortcut(sessionKey, messageText, userID, threadTS string) error {
+	if e.v1Store == nil {
+		return fmt.Errorf("HandleMessageShortcut: sessions feature disabled — set CC_CONNECT_SESSIONS_V1=1 to enable")
+	}
+
+	// Errors are swallowed intentionally: if SpawnOrAttach fails, AddPin below
+	// either errors clearly via ErrSessionNotFound (no session was created)
+	// OR pins on the pre-existing session. Best-effort spawn; don't block.
+	if _, _, err := e.v1Store.SpawnOrAttach(sessionKey, deriveRootObjective(messageText)); err != nil {
+		slog.Warn("v1: message shortcut: SpawnOrAttach failed", "key", sessionKey, "err", err)
+	}
+
+	pin := sessv1.PinnedItem{
+		Text:      truncatePinText(messageText),
+		Source:    "user_explicit",
+		PinnedAt:  time.Now(),
+		PinnedBy:  userID,
+		PinnedVia: "message_shortcut",
+	}
+	if _, err := e.v1Store.AddPin(sessionKey, pin); err != nil {
+		if errors.Is(err, sessv1.ErrPinLimitReached) {
+			return sessv1.ErrPinLimitReached
+		}
+		return fmt.Errorf("HandleMessageShortcut: add pin: %w", err)
+	}
+	if err := e.v1Store.SavePins(); err != nil {
+		slog.Warn("v1: message shortcut: persist pins failed", "key", sessionKey, "err", err)
+	}
+	return nil
+}
+
 // cmdPin handles the /pin slash command. It adds a pinned item to the active
 // v1 session and persists it to disk. When sessions are disabled or no active
 // session exists it replies with a user-visible explanation.
@@ -11210,8 +11255,7 @@ func (e *Engine) cmdPin(p Platform, msg *Message, args []string) {
 	pinnedVia := ""
 	// v1 LIMITATION: this branch is unreachable from the Slack UI — Slack does
 	// not allow slash commands inside threads. The code is correct and
-	// integration-tested (TestCmdPin_ReplyTo_*); v2 will replace the trigger
-	// with a Slack message shortcut. See docs/sessions.md "Known v1 Limitations".
+	// integration-tested (TestCmdPin_ReplyTo_*); v2 replaced; see HandleMessageShortcut.
 	if text == "" {
 		if msg.ParentText == "" {
 			e.reply(p, msg.ReplyCtx, "Usage: /pin <text> OR reply to a message and run /pin")

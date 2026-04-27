@@ -675,6 +675,14 @@ func main() {
 			slog.Debug("v1 sessions disabled (CC_CONNECT_SESSIONS_V1 not set to 1)", "project", proj.Name)
 		}
 
+		// Wire SetMessageShortcutHandler for platforms that support message shortcuts.
+		for _, p := range platforms {
+			if mss, ok := p.(core.MessageShortcutSetter); ok {
+				mss.SetMessageShortcutHandler(engine.HandleMessageShortcut)
+				slog.Debug("v2: wired shortcut handler", "project", proj.Name)
+			}
+		}
+
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}

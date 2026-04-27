@@ -29,6 +29,10 @@ type replyContext struct {
 	timestamp string // thread_ts for threading replies
 }
 
+// callbackIDPinMessage is the Slack callback_id for the "Pin to working set" message shortcut.
+// Must match the callback_id in the Slack app manifest.
+const callbackIDPinMessage = "pin_message"
+
 type Platform struct {
 	botToken              string
 	appToken              string
@@ -37,10 +41,17 @@ type Platform struct {
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
+	shortcutHandler       func(sessionKey, messageText, userID, threadTS string) error
 	cancel                context.CancelFunc
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
 	userNameCache         sync.Map // userID -> display name
+}
+
+// SetMessageShortcutHandler installs the handler the engine uses to process
+// Slack message shortcut interactions. Called by Engine.Start.
+func (p *Platform) SetMessageShortcutHandler(fn func(sessionKey, messageText, userID, threadTS string) error) {
+	p.shortcutHandler = fn
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -267,6 +278,48 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 		slog.Debug("slack: slash command", "command", cmd.Command, "text", cmd.Text, "user", cmd.UserID)
 		p.handler(p, msg)
+
+	case socketmode.EventTypeInteractive:
+		callback, ok := evt.Data.(slack.InteractionCallback)
+		if !ok {
+			slog.Debug("slack: interactive type assertion failed")
+			return
+		}
+		// ACK immediately — Slack requires a response within 3 seconds.
+		if evt.Request != nil {
+			p.socket.Ack(*evt.Request)
+		}
+		if callback.Type != slack.InteractionTypeMessageAction {
+			return
+		}
+		if callback.CallbackID != callbackIDPinMessage {
+			slog.Debug("slack: interactive: unknown callback_id", "callback_id", callback.CallbackID)
+			return
+		}
+		if !core.AllowList(p.allowFrom, callback.User.ID) {
+			slog.Debug("slack: message shortcut from unauthorized user", "user", callback.User.ID)
+			return
+		}
+
+		var sessionKey string
+		if p.shareSessionInChannel {
+			sessionKey = fmt.Sprintf("slack:%s", callback.Channel.ID)
+		} else {
+			sessionKey = fmt.Sprintf("slack:%s:%s", callback.Channel.ID, callback.User.ID)
+		}
+
+		msgText := callback.Message.Text
+		threadTS := callback.Message.ThreadTimestamp
+
+		slog.Debug("slack: message shortcut", "callback_id", callback.CallbackID, "user", callback.User.ID, "channel", callback.Channel.ID)
+
+		if p.shortcutHandler == nil {
+			slog.Warn("slack: message shortcut received but no handler registered")
+			return
+		}
+		if err := p.shortcutHandler(sessionKey, msgText, callback.User.ID, threadTS); err != nil {
+			slog.Warn("slack: message shortcut handler error", "err", err)
+		}
 
 	case socketmode.EventTypeConnecting:
 		slog.Debug("slack: connecting...")
