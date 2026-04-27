@@ -245,6 +245,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		// Convert slash command to a regular message with / prefix so the
 		// engine's command handling picks it up.
 		cmdName := strings.TrimPrefix(cmd.Command, "/")
+		// Slack built-ins block names like /new, /help, /search, /status — cc-connect's
+		// manifest uses cc-prefixed equivalents (/ccnew, /cchelp). Strip "cc" here so
+		// the dispatcher resolves cc-prefixed commands to their canonical names.
+		// GUARDED: only strip when the resulting name matches a known builtin, so
+		// legit cc-named commands like a hypothetical /ccmd-custom aren't affected.
+		if stripped := strings.TrimPrefix(cmdName, "cc"); stripped != cmdName && isBuiltinCommand(stripped) {
+			cmdName = stripped
+		}
 		content := "/" + cmdName
 		if cmd.Text != "" {
 			content += " " + cmd.Text
@@ -342,6 +350,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 		slog.Error("slack: connection error")
 	}
 }
+
+// isBuiltinCommand reports whether name is a registered cc-connect builtin.
+// Delegates to core so the check stays in sync with engine dispatch.
+func isBuiltinCommand(name string) bool { return core.IsBuiltinCommand(name) }
 
 func stripAppMentionText(text string) string {
 	if idx := strings.Index(text, "> "); idx != -1 && strings.HasPrefix(text, "<@") {

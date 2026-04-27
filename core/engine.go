@@ -3396,6 +3396,21 @@ var builtinCommands = []struct {
 	{[]string{"recall"}, "recall"},
 }
 
+// isBuiltinCommand reports whether name matches any entry in builtinCommands.
+func isBuiltinCommand(name string) bool {
+	for _, c := range builtinCommands {
+		for _, n := range c.names {
+			if name == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsBuiltinCommand is the exported version for use by platform packages.
+func IsBuiltinCommand(name string) bool { return isBuiltinCommand(name) }
+
 // isBtwCommand checks if a trimmed message starts with a /btw command.
 func isBtwCommand(trimmed string) bool {
 	return matchBtwPrefix(trimmed) != ""

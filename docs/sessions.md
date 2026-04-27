@@ -52,6 +52,16 @@ The following are deliberate v1 constraints, not bugs. They are planned for v2/v
 - **`recent_tool_result` always null** — the schema field exists but no code path writes to it in v1. v2 will wire it from the Claude Code invocation result.
 - **Turn log fields always present even when zero** — `hex_retrieval_token_count` and `tool_results_count` are always included in turn log entries with value 0. The schema is locked for v1; v2 will wire actual values from Claude Code invocations.
 
+### Slack slash command naming convention
+
+Slack reserves built-in slash commands like `/new`, `/help`, `/recall`, `/forget`, `/search`, `/status` — apps can't override them. cc-connect uses `cc`-prefixed equivalents (`/ccnew`, `/cchelp`, `/ccrecall`, `/ccforget`, `/ccsearch`, `/ccstatus`) and the slash command dispatcher strips the `cc` prefix before resolving against the builtinCommands registry.
+
+Adding a new slash command:
+1. Implement the handler (`cmdXxx`) and dispatch case in `core/engine.go`.
+2. Register the command name in `builtinCommands` (without the `cc` prefix).
+3. Register the user-facing slash command in `docs/slack-app-manifest.json`. If the canonical name collides with a Slack built-in, prefix it with `cc`.
+4. Re-import the manifest at api.slack.com/apps so Slack registers the slash command.
+
 ## Pin via Slack message shortcut (v2)
 
 v2 adds a Slack message shortcut as the thread-reachable entry point for pinning. Right-click any message → **More actions** → **Pin to working set**. This works in main channels and inside threads — it fixes the v1 reply-to-pin limitation where slash commands are blocked inside threads.
