@@ -49,6 +49,50 @@ func TestAddPin_LimitEnforced(t *testing.T) {
 	}
 }
 
+func TestSpawnOrAttach_AtomicUnderConcurrency(t *testing.T) {
+	store := NewInMemorySessionStore(nil, nil)
+	const key = "slack:C1:t1"
+	const goroutines = 50
+
+	type result struct {
+		wasSpawned bool
+		err        error
+	}
+	results := make([]result, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(idx int) {
+			defer wg.Done()
+			_, spawned, err := store.SpawnOrAttach(key, "obj")
+			results[idx] = result{wasSpawned: spawned, err: err}
+		}(i)
+	}
+	wg.Wait()
+
+	sess, err := store.GetByKey(key)
+	if err != nil {
+		t.Fatalf("GetByKey: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("session not found after concurrent SpawnOrAttach calls")
+	}
+
+	spawnedCount := 0
+	for _, r := range results {
+		if r.err != nil {
+			t.Errorf("SpawnOrAttach returned error: %v", r.err)
+		}
+		if r.wasSpawned {
+			spawnedCount++
+		}
+	}
+	if spawnedCount != 1 {
+		t.Errorf("wasSpawned == true count = %d, want exactly 1", spawnedCount)
+	}
+}
+
 func TestInMemorySessionStore_ConcurrentMutation(t *testing.T) {
 	store := NewInMemorySessionStore(nil, nil)
 	const key = "test-key"

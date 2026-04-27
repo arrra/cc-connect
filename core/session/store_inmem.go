@@ -59,6 +59,36 @@ func (s *InMemorySessionStore) Spawn(sessionKey, rootObjective string) (*Session
 	return sess, nil
 }
 
+// SpawnOrAttach atomically returns the existing session for sessionKey, or spawns a
+// new one with rootObjective if none exists. Holds the mutex for the full
+// read-modify-write to close the concurrent-spawn race. Returns (session, wasSpawned, err).
+func (s *InMemorySessionStore) SpawnOrAttach(sessionKey, rootObjective string) (*Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.sessions[sessionKey]; ok {
+		snapshot := *existing
+		return &snapshot, false, nil
+	}
+
+	now := time.Now()
+	pinned := make([]PinnedItem, len(s.savedPins[sessionKey]))
+	copy(pinned, s.savedPins[sessionKey])
+
+	sess := &Session{
+		SessionID:      uuid.New().String(),
+		SessionKey:     sessionKey,
+		RootObjective:  rootObjective,
+		Pinned:         pinned,
+		TurnCount:      0,
+		LastActivityTs: now,
+		CreatedAt:      now,
+	}
+	s.sessions[sessionKey] = sess
+	result := *sess
+	return &result, true, nil
+}
+
 // GetByKey returns the session for sessionKey, or nil if none exists.
 // READ-ONLY — do not mutate the returned pointer. Use IncrementTurn, AddPin,
 // or SetWorkingSet for operations that modify session state.

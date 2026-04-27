@@ -5,6 +5,11 @@ type SessionStore interface {
 	// Spawn creates a new session for the given sessionKey with a fresh UUID.
 	// If saved pins exist for sessionKey, they are loaded into the new session.
 	Spawn(sessionKey, rootObjective string) (*Session, error)
+	// SpawnOrAttach atomically: if no session exists for sessionKey, spawn one with the
+	// given root objective; otherwise return the existing session. Returns the session,
+	// a bool indicating whether a new session was created, and any error.
+	// Holds the implementation's lock for the full read-modify-write.
+	SpawnOrAttach(sessionKey, rootObjective string) (*Session, bool, error)
 	// GetByKey returns the active session for sessionKey, or nil if none exists.
 	// READ-ONLY — do not mutate the returned pointer. Use IncrementTurn, AddPin,
 	// or SetWorkingSet for operations that modify session state.

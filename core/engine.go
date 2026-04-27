@@ -1564,13 +1564,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 
 	// v1 spawn-or-attach: ensure cmdPin and prependV1Context can find the session.
-	// Uses msg.SessionKey (same key as cmdPin) — no key drift with the legacy path.
-	// Spawn failure is warn-logged and does NOT block the legacy turn.
+	// Atomic to close the concurrent-@mention race for the same session_key.
 	if e.v1Store != nil {
-		if existing, _ := e.v1Store.GetByKey(msg.SessionKey); existing == nil {
-			if _, err := e.v1Store.Spawn(msg.SessionKey, content); err != nil {
-				slog.Warn("v1: spawn failed", "session_key", msg.SessionKey, "err", err)
-			}
+		objective := deriveRootObjective(content)
+		if _, _, err := e.v1Store.SpawnOrAttach(msg.SessionKey, objective); err != nil {
+			slog.Warn("v1: spawn-or-attach failed", "session_key", msg.SessionKey, "err", err)
 		}
 	}
 
@@ -3346,6 +3344,23 @@ func matchBtwPrefix(trimmed string) string {
 		}
 	}
 	return ""
+}
+
+// slackMentionPrefixRe matches a leading Slack @mention like <@U12345678> with optional trailing whitespace.
+var slackMentionPrefixRe = regexp.MustCompile(`^<@[A-Za-z0-9_]+>\s*`)
+
+// deriveRootObjective extracts a clean root objective from the user's first message.
+// Strips the Slack @mention prefix (<@USERID>), trims whitespace, truncates to maxLen.
+// Returns "" if the cleaned text is empty.
+func deriveRootObjective(content string) string {
+	cleaned := strings.TrimSpace(content)
+	cleaned = slackMentionPrefixRe.ReplaceAllString(cleaned, "")
+	cleaned = strings.TrimSpace(cleaned)
+	const maxLen = 500
+	if len(cleaned) > maxLen {
+		cleaned = cleaned[:maxLen]
+	}
+	return cleaned
 }
 
 // matchPrefix finds a unique command matching the given prefix.
