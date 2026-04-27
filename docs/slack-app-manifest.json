@@ -211,6 +211,30 @@
         "description": "Pin text to the current session's context (v1 sessions)",
         "usage_hint": "<text>",
         "should_escape": false
+      },
+      {
+        "command": "/forget",
+        "description": "Remove a pin from the working set",
+        "usage_hint": "<index or text>",
+        "should_escape": false
+      },
+      {
+        "command": "/reset-scope",
+        "description": "Clear pins and root_objective; keep session alive",
+        "usage_hint": "",
+        "should_escape": false
+      },
+      {
+        "command": "/promote",
+        "description": "Promote a pin to durable hex memory",
+        "usage_hint": "<index or text>",
+        "should_escape": false
+      },
+      {
+        "command": "/recall",
+        "description": "Search hex memory and surface matches",
+        "usage_hint": "<query>",
+        "should_escape": false
       }
     ]
   },

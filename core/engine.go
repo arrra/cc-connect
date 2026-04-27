@@ -3393,6 +3393,7 @@ var builtinCommands = []struct {
 	{[]string{"forget"}, "forget"},
 	{[]string{"reset-scope"}, "reset-scope"},
 	{[]string{"promote"}, "promote"},
+	{[]string{"recall"}, "recall"},
 }
 
 // isBtwCommand checks if a trimmed message starts with a /btw command.
