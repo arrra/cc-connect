@@ -33,6 +33,10 @@ type replyContext struct {
 // Must match the callback_id in the Slack app manifest.
 const callbackIDPinMessage = "pin_message"
 
+// BangCmdFunc handles a "!<name>" command typed in a Slack thread.
+// channel and threadTS identify the Slack thread; args is the text after the command name.
+type BangCmdFunc func(ctx context.Context, channel, threadTS, args string) error
+
 type Platform struct {
 	botToken              string
 	appToken              string
@@ -42,10 +46,20 @@ type Platform struct {
 	socket                *socketmode.Client
 	handler               core.MessageHandler
 	shortcutHandler       func(sessionKey, messageText, userID, threadTS string) error
+	bangCmds              map[string]BangCmdFunc
 	cancel                context.CancelFunc
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
 	userNameCache         sync.Map // userID -> display name
+}
+
+// RegisterBangCmd registers a handler for a "!<name>" command.
+// Called during app startup to wire Twilio commands into the Slack platform.
+func (p *Platform) RegisterBangCmd(name string, fn BangCmdFunc) {
+	if p.bangCmds == nil {
+		p.bangCmds = make(map[string]BangCmdFunc)
+	}
+	p.bangCmds[strings.ToLower(name)] = fn
 }
 
 // SetMessageShortcutHandler installs the handler the engine uses to process
@@ -213,6 +227,22 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				if ev.Text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
+				}
+
+				// Dispatch "!<cmd> <args>" bang commands before passing to engine.
+				if len(p.bangCmds) > 0 && strings.HasPrefix(ev.Text, "!") {
+					parts := strings.SplitN(strings.TrimPrefix(ev.Text, "!"), " ", 2)
+					name := strings.ToLower(parts[0])
+					args := ""
+					if len(parts) > 1 {
+						args = parts[1]
+					}
+					if fn, ok := p.bangCmds[name]; ok {
+						if err := fn(context.Background(), ev.Channel, ev.ThreadTimeStamp, args); err != nil {
+							slog.Error("slack: bang command failed", "cmd", name, "error", err)
+						}
+						return
+					}
 				}
 
 				msg := &core.Message{
@@ -505,6 +535,25 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		return fmt.Errorf("slack: send image: %w", err)
 	}
 	return nil
+}
+
+// PostMessage sends a new top-level message to channelID and returns its timestamp.
+// Implements platform/twilio.SlackPoster and platform/slack/commands.SlackReplier.
+func (p *Platform) PostMessage(ctx context.Context, channelID, text string) (string, error) {
+	_, ts, err := p.client.PostMessageContext(ctx, channelID,
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionDisableLinkUnfurl(),
+	)
+	if err != nil {
+		return "", fmt.Errorf("slack: post message: %w", err)
+	}
+	return ts, nil
+}
+
+// PostReply sends a threaded reply to an existing message.
+// Implements platform/twilio.SlackPoster and platform/slack/commands.SlackReplier.
+func (p *Platform) PostReply(ctx context.Context, channelID, threadTS, text string) error {
+	return p.Reply(ctx, replyContext{channel: channelID, timestamp: threadTS}, text)
 }
 
 var _ core.ImageSender = (*Platform)(nil)
