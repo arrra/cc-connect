@@ -60,7 +60,59 @@ func newTestInboundRouter(t *testing.T, slack *mockSlack, store *PhoneThreadStor
 	if store == nil {
 		store = NewPhoneThreadStore("")
 	}
-	return NewInboundRouter(adapter, slack, store, "#chief-of-staff")
+	r, err := NewInboundRouter(adapter, slack, store, "#chief-of-staff")
+	if err != nil {
+		t.Fatalf("NewInboundRouter: %v", err)
+	}
+	return r
+}
+
+// TestNewInboundRouter_FailsWhenNoChannel verifies that NewInboundRouter returns an error
+// when neither the explicit arg nor SLACK_LEADS_CHANNEL env var is set.
+func TestNewInboundRouter_FailsWhenNoChannel(t *testing.T) {
+	t.Setenv("SLACK_LEADS_CHANNEL", "")
+	adapter := &TwilioAdapter{authToken: "secret"}
+	store := NewPhoneThreadStore("")
+
+	r, err := NewInboundRouter(adapter, &mockSlack{}, store, "")
+	if err == nil {
+		t.Fatal("expected error when no leads channel configured; got nil")
+	}
+	if r != nil {
+		t.Fatal("expected nil router on error")
+	}
+}
+
+// TestNewInboundRouter_ResolvesFromEnv verifies that the channel is resolved from
+// the SLACK_LEADS_CHANNEL env var when the explicit arg is empty.
+func TestNewInboundRouter_ResolvesFromEnv(t *testing.T) {
+	t.Setenv("SLACK_LEADS_CHANNEL", "#env-channel")
+	adapter := &TwilioAdapter{authToken: "secret"}
+	store := NewPhoneThreadStore("")
+
+	r, err := NewInboundRouter(adapter, &mockSlack{}, store, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.leadsChannel != "#env-channel" {
+		t.Errorf("leadsChannel = %q, want #env-channel", r.leadsChannel)
+	}
+}
+
+// TestNewInboundRouter_ExplicitArgTakesPrecedence verifies that the explicit arg
+// takes precedence over the env var.
+func TestNewInboundRouter_ExplicitArgTakesPrecedence(t *testing.T) {
+	t.Setenv("SLACK_LEADS_CHANNEL", "#env-channel")
+	adapter := &TwilioAdapter{authToken: "secret"}
+	store := NewPhoneThreadStore("")
+
+	r, err := NewInboundRouter(adapter, &mockSlack{}, store, "#explicit-channel")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.leadsChannel != "#explicit-channel" {
+		t.Errorf("leadsChannel = %q, want #explicit-channel", r.leadsChannel)
+	}
 }
 
 // signedSMSRequest builds a Twilio-signed POST request for the given params and auth token.
@@ -258,5 +310,94 @@ func TestInboundRouter_SlackReplyError(t *testing.T) {
 
 	if rr.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// TestEscapeSlackText verifies that user-supplied text is sanitized before
+// being posted to Slack to prevent mention injection and markdown rendering.
+func TestEscapeSlackText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain text passes through", "Hello, world!", "Hello, world!"},
+		{"ampersand escaped", "AT&T", "AT&amp;T"},
+		{"less-than escaped", "1 < 2", "1 &lt; 2"},
+		{"greater-than escaped", "2 > 1", "2 &gt; 1"},
+		{"user mention blocked", "<@U123> hey", "&lt;@U123&gt; hey"},
+		{"channel mention blocked", "<!channel> alert", "&lt;!channel&gt; alert"},
+		{"here mention blocked", "<!here>", "&lt;!here&gt;"},
+		{"channel link blocked", "<#C0123>", "&lt;#C0123&gt;"},
+		{"all three chars", "<>&", "&lt;&gt;&amp;"},
+		{"ampersand escapes first to avoid double-escaping", "<b>&amp;</b>", "&lt;b&gt;&amp;amp;&lt;/b&gt;"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := escapeSlackText(tc.input)
+			if got != tc.want {
+				t.Errorf("escapeSlackText(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInboundRouter_SlackEscaping verifies that special Slack tokens in SMS
+// bodies are escaped before being posted — preventing mention injection.
+func TestInboundRouter_SlackEscaping_KnownThread(t *testing.T) {
+	const rawURL = "https://example.com/twilio/inbound-sms"
+	const phone = "+19165550200"
+
+	slack := &mockSlack{}
+	store := NewPhoneThreadStore("")
+	_ = store.SetThread(phone, LeadThread{Channel: "C789", ThreadTS: "3333333333.000001"})
+	router := newTestInboundRouter(t, slack, store)
+
+	params := smsParams(phone, "SM200", "<@U123> buy now!")
+	req := signedSMSRequest(t, rawURL, params, "secret")
+	rr := httptest.NewRecorder()
+	router.HandleInbound(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(slack.postReplies) != 1 {
+		t.Fatalf("postReplies = %d, want 1", len(slack.postReplies))
+	}
+	got := slack.postReplies[0].Text
+	if strings.Contains(got, "<@") {
+		t.Errorf("reply text %q contains raw <@ — mention not escaped", got)
+	}
+	if !strings.Contains(got, "&lt;@U123&gt;") {
+		t.Errorf("reply text %q should contain escaped mention &lt;@U123&gt;", got)
+	}
+}
+
+// TestInboundRouter_SlackEscaping_OrphanInbound verifies escaping for orphan SMS posts.
+func TestInboundRouter_SlackEscaping_OrphanInbound(t *testing.T) {
+	const rawURL = "https://example.com/twilio/inbound-sms"
+	const phone = "+19165550201"
+
+	slack := &mockSlack{nextTS: "4444444444.000001"}
+	store := NewPhoneThreadStore("")
+	router := newTestInboundRouter(t, slack, store)
+
+	params := smsParams(phone, "SM201", "<!channel> urgent deal!")
+	req := signedSMSRequest(t, rawURL, params, "secret")
+	rr := httptest.NewRecorder()
+	router.HandleInbound(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if len(slack.postMessages) != 1 {
+		t.Fatalf("postMessages = %d, want 1", len(slack.postMessages))
+	}
+	got := slack.postMessages[0].Text
+	if strings.Contains(got, "<!channel>") {
+		t.Errorf("message text %q contains raw <!channel> — channel ping not escaped", got)
+	}
+	if !strings.Contains(got, "&lt;!channel&gt;") {
+		t.Errorf("message text %q should contain escaped &lt;!channel&gt;", got)
 	}
 }

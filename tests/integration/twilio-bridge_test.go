@@ -241,7 +241,10 @@ func TestTwilioBridge_InboundSMS_KnownThread(t *testing.T) {
 	_ = store.SetThread(leadPhone, tw.LeadThread{Channel: channel, ThreadTS: existingTS})
 
 	slacker := &bridgeMockSlack{}
-	router := tw.NewInboundRouter(adapter, slacker, store, channel)
+	router, err := tw.NewInboundRouter(adapter, slacker, store, channel)
+	if err != nil {
+		t.Fatalf("NewInboundRouter: %v", err)
+	}
 
 	params := url.Values{
 		"From":       {leadPhone},
@@ -307,7 +310,10 @@ func TestTwilioBridge_InboundSMS_OrphanCreatesThread(t *testing.T) {
 	})
 	store := tw.NewPhoneThreadStore("")
 	slacker := &bridgeMockSlack{nextTS: returnedTS}
-	router := tw.NewInboundRouter(adapter, slacker, store, channel)
+	router, err := tw.NewInboundRouter(adapter, slacker, store, channel)
+	if err != nil {
+		t.Fatalf("NewInboundRouter: %v", err)
+	}
 
 	params := url.Values{
 		"From":       {orphanPhone},
@@ -357,7 +363,8 @@ func TestTwilioBridge_Call(t *testing.T) {
 	const callSID = "CA_bridge_001"
 
 	t.Setenv("SAGAR_CELL_NUMBER", sagarCell)
-	t.Setenv("RECORDING_STATUS_URL", "")
+	t.Setenv("RECORDING_STATUS_URL", "https://example.com/webhooks/recording-status")
+	t.Setenv("TWILIO_LEAD_PREAMBLE_URL", "https://example.com/twilio/lead-preamble")
 
 	store := tw.NewPhoneThreadStore("")
 	_ = store.SetThread(leadPhone, tw.LeadThread{Channel: channel, ThreadTS: threadTS})
@@ -382,7 +389,7 @@ func TestTwilioBridge_Call(t *testing.T) {
 	}
 
 	// TwiML includes California two-party consent preamble (hard legal requirement).
-	if !strings.Contains(caller.lastTwimlXML, "This call may be recorded for quality.") {
+	if !strings.Contains(caller.lastTwimlXML, "This call may be recorded for quality and training purposes.") {
 		t.Errorf("TwiML missing consent preamble; got:\n%s", caller.lastTwimlXML)
 	}
 	sayIdx := strings.Index(caller.lastTwimlXML, "<Say")
@@ -434,7 +441,10 @@ func TestTwilioBridge_LeadStateUpdate(t *testing.T) {
 
 	slacker := &bridgeMockSlack{nextTS: newTS}
 	store := tw.NewPhoneThreadStore("")
-	h := slacksvc.NewVistaHillsHandler(slacker, store, secret, channel)
+	h, err := slacksvc.NewVistaHillsHandler(slacker, store, secret, channel)
+	if err != nil {
+		t.Fatalf("NewVistaHillsHandler: %v", err)
+	}
 
 	// --- Step 1: POST /vista-hills/lead-created ---
 	createdPayload := slacksvc.LeadCreatedRequest{

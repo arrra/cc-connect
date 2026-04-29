@@ -57,10 +57,15 @@ type VistaHillsHandler struct {
 
 // NewVistaHillsHandler creates a VistaHillsHandler.
 // leadsChannel defaults to $SLACK_LEADS_CHANNEL or "#chief-of-staff" if empty.
-// secret comes from $CC_CONNECT_WEBHOOK_SECRET if empty.
-func NewVistaHillsHandler(slack vistaSlackPoster, store *tw.PhoneThreadStore, secret, leadsChannel string) *VistaHillsHandler {
+// secret falls back to $CC_CONNECT_WEBHOOK_SECRET if the arg is empty.
+// Returns an error if no secret is available — an empty secret would make the
+// endpoint accept all requests (fail-open), which is a security violation.
+func NewVistaHillsHandler(slack vistaSlackPoster, store *tw.PhoneThreadStore, secret, leadsChannel string) (*VistaHillsHandler, error) {
 	if secret == "" {
 		secret = os.Getenv("CC_CONNECT_WEBHOOK_SECRET")
+	}
+	if secret == "" {
+		return nil, fmt.Errorf("CC_CONNECT_VISTA_HILLS_SECRET (or CC_CONNECT_WEBHOOK_SECRET) must be set")
 	}
 	if leadsChannel == "" {
 		leadsChannel = os.Getenv("SLACK_LEADS_CHANNEL")
@@ -75,7 +80,7 @@ func NewVistaHillsHandler(slack vistaSlackPoster, store *tw.PhoneThreadStore, se
 		leadsChannel: leadsChannel,
 		leadPhones:   make(map[int64]string),
 		seenUpdates:  make(map[string]struct{}),
-	}
+	}, nil
 }
 
 // HandleLeadCreated is the HTTP handler for POST /vista-hills/lead-created.
@@ -224,9 +229,11 @@ func (h *VistaHillsHandler) HandleLeadStateUpdate(w http.ResponseWriter, r *http
 }
 
 // authenticate checks the X-CC-Connect-Secret header.
+// Returns false unconditionally when secret is empty — empty secret means the
+// handler was constructed incorrectly; refusing all requests is safer than fail-open.
 func (h *VistaHillsHandler) authenticate(r *http.Request) bool {
 	if h.secret == "" {
-		return true
+		return false
 	}
 	got := r.Header.Get("X-CC-Connect-Secret")
 	return subtle.ConstantTimeCompare([]byte(got), []byte(h.secret)) == 1

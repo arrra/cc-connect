@@ -45,6 +45,9 @@ func (a *TwilioAdapter) Init() error {
 	}
 
 	a.client = newClient(a.accountSID, a.authToken)
+	if os.Getenv("RECORDING_STATUS_URL") == "" {
+		slog.Warn("[twilio] recording disabled — RECORDING_STATUS_URL not set")
+	}
 	slog.Info("twilio: adapter initialized", "from", a.fromNumber)
 	return nil
 }
@@ -110,8 +113,8 @@ func verifyTwilioSignature(authToken, rawURL string, params url.Values, sig stri
 	sb.WriteString(rawURL)
 	for _, k := range keys {
 		sb.WriteString(k)
-		if vals := params[k]; len(vals) > 0 {
-			sb.WriteString(vals[0])
+		for _, v := range params[k] {
+			sb.WriteString(v)
 		}
 	}
 

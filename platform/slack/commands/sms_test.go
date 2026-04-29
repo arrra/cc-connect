@@ -235,3 +235,26 @@ func TestFormatPhone(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskPhone_Sms(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"+19165550123", "+19*****0123"},
+		{"short", "***"},
+	}
+	for _, tc := range cases {
+		if got := maskPhone(tc.input); got != tc.want {
+			t.Errorf("maskPhone(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestPersistOutbound_BestEffort confirms persistOutbound doesn't panic on bad URLs.
+func TestPersistOutbound_BestEffort(t *testing.T) {
+	// Invalid URL — must not panic.
+	persistOutbound("://bad-url", "+19165550100", "hello", "SMxxx")
+	// Connection refused — must not panic.
+	persistOutbound("http://127.0.0.1:1", "+19165550100", "hello", "SMyyy")
+}

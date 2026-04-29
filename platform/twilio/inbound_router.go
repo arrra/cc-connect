@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // SlackPoster posts messages to Slack on behalf of the inbound router.
@@ -29,22 +30,33 @@ type InboundRouter struct {
 	leadsChannel string
 }
 
+// escapeSlackText escapes user-supplied text before posting to Slack to prevent
+// mention injection (<@U123>, <!channel>, <#C123>) and markdown rendering.
+// Follows Slack's documented escaping rules: https://api.slack.com/reference/surfaces/formatting#escaping
+func escapeSlackText(text string) string {
+	text = strings.ReplaceAll(text, "&", "&amp;")
+	text = strings.ReplaceAll(text, "<", "&lt;")
+	text = strings.ReplaceAll(text, ">", "&gt;")
+	return text
+}
+
 // NewInboundRouter creates an InboundRouter.
-// leadsChannel comes from the SLACK_LEADS_CHANNEL env var if not provided explicitly;
-// defaults to "#chief-of-staff".
-func NewInboundRouter(adapter *TwilioAdapter, slack SlackPoster, store *PhoneThreadStore, leadsChannel string) *InboundRouter {
+// leadsChannel is resolved from the explicit arg first, then SLACK_LEADS_CHANNEL env.
+// Returns an error if neither is set — silently falling back to a hardcoded channel
+// could leak lead PII to the wrong workspace.
+func NewInboundRouter(adapter *TwilioAdapter, slack SlackPoster, store *PhoneThreadStore, leadsChannel string) (*InboundRouter, error) {
 	if leadsChannel == "" {
 		leadsChannel = os.Getenv("SLACK_LEADS_CHANNEL")
 	}
 	if leadsChannel == "" {
-		leadsChannel = "#chief-of-staff"
+		return nil, fmt.Errorf("SLACK_LEADS_CHANNEL is required: set the env var or pass a channel explicitly")
 	}
 	return &InboundRouter{
 		adapter:      adapter,
 		slack:        slack,
 		store:        store,
 		leadsChannel: leadsChannel,
-	}
+	}, nil
 }
 
 // HandleInbound is the HTTP handler for POST /twilio/inbound-sms.
@@ -65,10 +77,11 @@ func (r *InboundRouter) HandleInbound(w http.ResponseWriter, req *http.Request) 
 
 	ctx := req.Context()
 	thread, known := r.store.GetThread(inbound.From)
+	safeBody := escapeSlackText(inbound.Body)
 
 	var threadTS string
 	if known {
-		if err := r.slack.PostReply(ctx, thread.Channel, thread.ThreadTS, inbound.Body); err != nil {
+		if err := r.slack.PostReply(ctx, thread.Channel, thread.ThreadTS, safeBody); err != nil {
 			slog.Error("[twilio-inbound] slack reply failed",
 				"from", maskPhone(inbound.From),
 				"sid", inbound.MessageSID,
@@ -80,7 +93,7 @@ func (r *InboundRouter) HandleInbound(w http.ResponseWriter, req *http.Request) 
 		threadTS = thread.ThreadTS
 	} else {
 		msg := fmt.Sprintf("📱 Inbound SMS from %s\nAI not yet engaged — orphan inbound\n\n%s",
-			maskPhone(inbound.From), inbound.Body)
+			maskPhone(inbound.From), safeBody)
 		ts, err := r.slack.PostMessage(ctx, r.leadsChannel, msg)
 		if err != nil {
 			slog.Error("[twilio-inbound] slack post failed",

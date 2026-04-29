@@ -25,8 +25,8 @@ func computeSig(authToken, rawURL string, params url.Values) string {
 	sb.WriteString(rawURL)
 	for _, k := range keys {
 		sb.WriteString(k)
-		if vals := params[k]; len(vals) > 0 {
-			sb.WriteString(vals[0])
+		for _, v := range params[k] {
+			sb.WriteString(v)
 		}
 	}
 

@@ -62,6 +62,11 @@ func (p *Platform) RegisterBangCmd(name string, fn BangCmdFunc) {
 	p.bangCmds[strings.ToLower(name)] = fn
 }
 
+// HasBangCmd reports whether a bang command with the given name is registered.
+func (p *Platform) HasBangCmd(name string) bool {
+	return p.bangCmds[strings.ToLower(name)] != nil
+}
+
 // SetMessageShortcutHandler installs the handler the engine uses to process
 // Slack message shortcut interactions. Called by Engine.Start.
 func (p *Platform) SetMessageShortcutHandler(fn func(sessionKey, messageText, userID, threadTS string) error) {

@@ -63,29 +63,50 @@ func (s *PhoneThreadStore) GetPhone(channel, threadTS string) (string, bool) {
 // SetThread stores or updates a lead's Slack thread mapping.
 func (s *PhoneThreadStore) SetThread(phone string, thread LeadThread) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.threads[phone] = thread
-	return s.saveLocked()
+	snap := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.persist(snap)
 }
 
-func (s *PhoneThreadStore) saveLocked() error {
+// snapshotLocked returns a deep copy of the current thread map. Caller must hold s.mu.
+func (s *PhoneThreadStore) snapshotLocked() map[string]LeadThread {
+	cp := make(map[string]LeadThread, len(s.threads))
+	for k, v := range s.threads {
+		cp[k] = v
+	}
+	return cp
+}
+
+// persist marshals the snapshot to disk outside of any lock.
+func (s *PhoneThreadStore) persist(snap map[string]LeadThread) error {
 	if s.path == "" {
 		return nil
 	}
-	snap := threadStoreSnapshot{Threads: s.threads}
-	data, err := json.MarshalIndent(snap, "", "  ")
+	data, err := json.MarshalIndent(threadStoreSnapshot{Threads: snap}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("thread_store: marshal: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("thread_store: mkdir: %w", err)
 	}
+	// Ensure directory is 0700 regardless of umask.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("thread_store: chmod dir: %w", err)
+	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("thread_store: write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("thread_store: rename: %w", err)
+	}
+	// Explicit chmod after rename; rename preserves the source perms but umask
+	// could have widened them if the tmp write used a different umask path.
+	if err := os.Chmod(s.path, 0o600); err != nil {
+		return fmt.Errorf("thread_store: chmod file: %w", err)
 	}
 	return nil
 }

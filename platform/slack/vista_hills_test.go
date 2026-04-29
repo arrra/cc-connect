@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,7 +47,11 @@ func newTestVistaHillsHandler(t *testing.T, slack *mockVistaSlack, store *tw.Pho
 	if store == nil {
 		store = tw.NewPhoneThreadStore("")
 	}
-	return NewVistaHillsHandler(slack, store, "test-secret", "#chief-of-staff")
+	h, err := NewVistaHillsHandler(slack, store, "test-secret", "#chief-of-staff")
+	if err != nil {
+		t.Fatalf("NewVistaHillsHandler: %v", err)
+	}
+	return h
 }
 
 // postJSON builds a POST request with JSON body and optional secret header.
@@ -266,6 +271,28 @@ func TestVistaHills_StateUpdateIdempotency(t *testing.T) {
 	}
 }
 
+// TestVistaHillsHandler_EmptySecretReturnsError verifies that NewVistaHillsHandler
+// returns an error when neither the arg nor env vars provide a secret.
+func TestVistaHillsHandler_EmptySecretReturnsError(t *testing.T) {
+	t.Setenv("CC_CONNECT_WEBHOOK_SECRET", "")
+	slack := &mockVistaSlack{}
+	store := tw.NewPhoneThreadStore("")
+	_, err := NewVistaHillsHandler(slack, store, "", "#chief-of-staff")
+	if err == nil {
+		t.Fatal("expected error for empty secret, got nil")
+	}
+}
+
+// TestVistaHillsHandler_AuthenticateEmptySecretDenies verifies that authenticate()
+// returns false when the handler's secret field is empty (defense in depth).
+func TestVistaHillsHandler_AuthenticateEmptySecretDenies(t *testing.T) {
+	h := &VistaHillsHandler{secret: ""}
+	req := httptest.NewRequest(http.MethodPost, "/vista-hills/lead-created", nil)
+	if h.authenticate(req) {
+		t.Fatal("authenticate() must return false when secret is empty")
+	}
+}
+
 // TestVistaHills_StateUpdateUnknownLead verifies a state-update for an unknown lead returns 404.
 func TestVistaHills_StateUpdateUnknownLead(t *testing.T) {
 	slack := &mockVistaSlack{}
@@ -286,5 +313,128 @@ func TestVistaHills_StateUpdateUnknownLead(t *testing.T) {
 	}
 	if len(slack.replies) != 0 {
 		t.Error("no Slack replies expected for unknown lead")
+	}
+}
+
+// TestVistaHills_LeadCreated_MissingFields covers the phone+lead_id required validation.
+func TestVistaHills_LeadCreated_MissingFields(t *testing.T) {
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := postJSON(t, "/vista-hills/lead-created", map[string]any{"name": "Mary"}, "test-secret")
+	rr := httptest.NewRecorder()
+	h.HandleLeadCreated(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestVistaHills_LeadCreated_SlackError covers the Slack post failure path.
+func TestVistaHills_LeadCreated_SlackError(t *testing.T) {
+	slack := &mockVistaSlack{postErr: errors.New("slack: channel not found")}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	payload := LeadCreatedRequest{
+		LeadID: 1001,
+		Phone:  "+19165550100",
+		Name:   "Mary",
+		Source: "web",
+	}
+	req := postJSON(t, "/vista-hills/lead-created", payload, "test-secret")
+	rr := httptest.NewRecorder()
+	h.HandleLeadCreated(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr.Code)
+	}
+}
+
+// TestVistaHills_LeadCreated_MethodNotAllowed covers the GET → 405 branch.
+func TestVistaHills_LeadCreated_MethodNotAllowed(t *testing.T) {
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/vista-hills/lead-created", nil)
+	rr := httptest.NewRecorder()
+	h.HandleLeadCreated(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestVistaHills_LeadStateUpdate_MissingFields covers the lead_id+to_state required validation.
+func TestVistaHills_LeadStateUpdate_MissingFields(t *testing.T) {
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := postJSON(t, "/vista-hills/lead-state-update", map[string]any{"lead_id": 1}, "test-secret")
+	rr := httptest.NewRecorder()
+	h.HandleLeadStateUpdate(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestVistaHills_LeadStateUpdate_SlackReplyError covers the Slack reply failure path.
+func TestVistaHills_LeadStateUpdate_SlackReplyError(t *testing.T) {
+	store := tw.NewPhoneThreadStore("")
+	_ = store.SetThread("+19165550100", tw.LeadThread{Channel: "CABC", ThreadTS: "111.222"})
+
+	slack := &mockVistaSlack{replyErr: errors.New("slack: not in channel")}
+	h := newTestVistaHillsHandler(t, slack, store)
+
+	// Seed the lead phone map via a successful lead-created first.
+	payload1 := LeadCreatedRequest{LeadID: 2002, Phone: "+19165550100", Name: "Mary", Source: "web"}
+	slack.postErr = nil
+	slack.replyErr = nil
+	req1 := postJSON(t, "/vista-hills/lead-created", payload1, "test-secret")
+	rr1 := httptest.NewRecorder()
+	h.HandleLeadCreated(rr1, req1)
+
+	// Now set the reply error and test state update.
+	slack.replyErr = errors.New("slack: not in channel")
+	payload2 := LeadStateUpdateRequest{LeadID: 2002, FromState: "new", ToState: "qualified"}
+	req2 := postJSON(t, "/vista-hills/lead-state-update", payload2, "test-secret")
+	rr2 := httptest.NewRecorder()
+	h.HandleLeadStateUpdate(rr2, req2)
+
+	if rr2.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rr2.Code)
+	}
+}
+
+// TestVistaHills_LeadStateUpdate_NoThread covers the "lead known but no Slack thread" path.
+func TestVistaHills_LeadStateUpdate_NoThread(t *testing.T) {
+	store := tw.NewPhoneThreadStore("") // empty — no threads
+	slack := &mockVistaSlack{nextTS: "1700000001.999"}
+	h := newTestVistaHillsHandler(t, slack, store)
+
+	// Seed lead phone map via lead-created (Slack succeeds but store has no thread).
+	payload1 := LeadCreatedRequest{LeadID: 3003, Phone: "+19165550101", Name: "Bob", Source: "web"}
+	req1 := postJSON(t, "/vista-hills/lead-created", payload1, "test-secret")
+	rr1 := httptest.NewRecorder()
+	h.HandleLeadCreated(rr1, req1)
+
+	// Now use a brand-new store with no thread for that phone.
+	emptyStore := tw.NewPhoneThreadStore("")
+	h2, err := NewVistaHillsHandler(slack, emptyStore, "test-secret", "#chief-of-staff")
+	if err != nil {
+		t.Fatalf("NewVistaHillsHandler: %v", err)
+	}
+	// Manually seed the phone map.
+	h2.mu.Lock()
+	h2.leadPhones[3003] = "+19165550101"
+	h2.mu.Unlock()
+
+	payload2 := LeadStateUpdateRequest{LeadID: 3003, FromState: "new", ToState: "contacted"}
+	req2 := postJSON(t, "/vista-hills/lead-state-update", payload2, "test-secret")
+	rr2 := httptest.NewRecorder()
+	h2.HandleLeadStateUpdate(rr2, req2)
+
+	if rr2.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (no thread)", rr2.Code)
 	}
 }
