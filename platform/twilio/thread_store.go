@@ -3,6 +3,7 @@ package twilio
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -61,11 +62,13 @@ func (s *PhoneThreadStore) GetPhone(channel, threadTS string) (string, bool) {
 }
 
 // SetThread stores or updates a lead's Slack thread mapping.
+// The write lock is held through persist so concurrent callers cannot write
+// the same .tmp file and race on rename.
 func (s *PhoneThreadStore) SetThread(phone string, thread LeadThread) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.threads[phone] = thread
 	snap := s.snapshotLocked()
-	s.mu.Unlock()
 	return s.persist(snap)
 }
 
@@ -115,6 +118,18 @@ func (s *PhoneThreadStore) load() {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return
+	}
+	// Fix legacy files that may have been created world-readable (0644).
+	if chmodErr := os.Chmod(s.path, 0o600); chmodErr != nil && !os.IsNotExist(chmodErr) {
+		slog.Warn("thread_store: could not fix file permissions", "path", s.path, "error", chmodErr)
+	}
+	// Fix directory permissions if the path has a directory component.
+	if dir := filepath.Dir(s.path); dir != "." {
+		if di, statErr := os.Stat(dir); statErr == nil && di.Mode().Perm() != 0o700 {
+			if chmodErr := os.Chmod(dir, 0o700); chmodErr != nil {
+				slog.Warn("thread_store: could not fix dir permissions", "path", dir, "error", chmodErr)
+			}
+		}
 	}
 	var snap threadStoreSnapshot
 	if err := json.Unmarshal(data, &snap); err != nil {

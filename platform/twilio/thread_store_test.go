@@ -1,8 +1,10 @@
 package twilio
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -136,6 +138,62 @@ func TestPhoneThreadStore_LoadCorrupted(t *testing.T) {
 	// Should start empty, not panic.
 	if _, ok := s.GetThread("+19165550100"); ok {
 		t.Error("expected empty store after corrupt file")
+	}
+}
+
+func TestPhoneThreadStore_ConcurrentSetThread(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "threads.json")
+	s := NewPhoneThreadStore(path)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		phone := fmt.Sprintf("+1555%07d", i)
+		go func(p string) {
+			defer wg.Done()
+			if err := s.SetThread(p, LeadThread{Channel: "C1", ThreadTS: "1.0"}); err != nil {
+				t.Errorf("SetThread(%s): %v", p, err)
+			}
+		}(phone)
+	}
+	wg.Wait()
+
+	// Reload from disk and verify all 50 mappings survived.
+	s2 := NewPhoneThreadStore(path)
+	for i := 0; i < n; i++ {
+		phone := fmt.Sprintf("+1555%07d", i)
+		if _, ok := s2.GetThread(phone); !ok {
+			t.Errorf("reload: missing mapping for %s", phone)
+		}
+	}
+}
+
+func TestPhoneThreadStore_LegacyFilePermissionsCorrected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "threads.json")
+	// Write a valid store file with world-readable permissions (legacy behavior).
+	initial := `{"threads":{"+19165550100":{"channel":"C1","thread_ts":"1.0"}}}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Load — should trigger the chmod fix.
+	s := NewPhoneThreadStore(path)
+
+	// Data is readable.
+	if _, ok := s.GetThread("+19165550100"); !ok {
+		t.Error("expected thread to load from legacy file")
+	}
+
+	// File must now be 0600.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("file perm after load = %04o, want 0600", got)
 	}
 }
 

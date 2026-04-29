@@ -438,3 +438,212 @@ func TestVistaHills_LeadStateUpdate_NoThread(t *testing.T) {
 		t.Errorf("status = %d, want 404 (no thread)", rr2.Code)
 	}
 }
+
+// TestFormatLeadBlock_EscapesUserInput verifies that user-controlled fields in
+// formatLeadBlock are escaped to prevent Slack mention injection.
+func TestFormatLeadBlock_EscapesUserInput(t *testing.T) {
+	slack := &mockVistaSlack{nextTS: "1700000010.000001"}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := LeadCreatedRequest{
+		LeadID:   9001,
+		Phone:    "+19165550199",
+		Name:     "<!channel> Hacker",
+		Source:   "<@U123>",
+		Campaign: "test&campaign",
+		Email:    "<@U456>&<>",
+	}
+
+	text := h.formatLeadBlock(req)
+
+	injections := []string{"<!channel>", "<@U123>", "<@U456>"}
+	for _, inj := range injections {
+		if strings.Contains(text, inj) {
+			t.Errorf("formatLeadBlock output contains unescaped injection %q: %s", inj, text)
+		}
+	}
+	if !strings.Contains(text, "&lt;!channel&gt;") {
+		t.Errorf("expected escaped <!channel> in output, got: %s", text)
+	}
+	if !strings.Contains(text, "&amp;") {
+		t.Errorf("expected escaped & in output, got: %s", text)
+	}
+}
+
+// TestFormatStateUpdate_EscapesUserInput verifies that state names and QualifyingData
+// keys/values are escaped before being included in Slack messages.
+func TestFormatStateUpdate_EscapesUserInput(t *testing.T) {
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := LeadStateUpdateRequest{
+		LeadID:    9002,
+		FromState: "<!channel>",
+		ToState:   "<@U123>",
+		QualifyingData: map[string]any{
+			"<key>":    "&<value>",
+			"normal":   "text",
+			"<!here>":  "<!everyone>",
+		},
+	}
+
+	text := h.formatStateUpdate(req)
+
+	injections := []string{"<!channel>", "<@U123>", "<!here>", "<!everyone>"}
+	for _, inj := range injections {
+		if strings.Contains(text, inj) {
+			t.Errorf("formatStateUpdate output contains unescaped injection %q: %s", inj, text)
+		}
+	}
+	if !strings.Contains(text, "&lt;!channel&gt;") {
+		t.Errorf("expected escaped <!channel> in from_state, got: %s", text)
+	}
+	if !strings.Contains(text, "&lt;@U123&gt;") {
+		t.Errorf("expected escaped <@U123> in to_state, got: %s", text)
+	}
+}
+
+// TestFormatStateUpdate_DeterministicKeyOrder verifies that formatStateUpdate
+// produces identical output on repeated calls for the same QualifyingData map.
+func TestFormatStateUpdate_DeterministicKeyOrder(t *testing.T) {
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, nil)
+
+	req := LeadStateUpdateRequest{
+		LeadID:    9003,
+		FromState: "new",
+		ToState:   "qualified",
+		QualifyingData: map[string]any{
+			"zebra":   "last",
+			"alpha":   "first",
+			"mango":   "middle",
+			"banana":  "second",
+			"cranberry": "third",
+		},
+	}
+
+	first := h.formatStateUpdate(req)
+	for i := 0; i < 99; i++ {
+		got := h.formatStateUpdate(req)
+		if got != first {
+			t.Fatalf("formatStateUpdate output differs on call %d:\nfirst: %s\ngot:   %s", i+2, first, got)
+		}
+	}
+
+	// Also verify keys appear in sorted order: alpha, banana, cranberry, mango, zebra.
+	pos := func(key string) int {
+		idx := strings.Index(first, key)
+		if idx < 0 {
+			t.Fatalf("key %q not found in output: %s", key, first)
+		}
+		return idx
+	}
+	if !(pos("alpha") < pos("banana") && pos("banana") < pos("cranberry") &&
+		pos("cranberry") < pos("mango") && pos("mango") < pos("zebra")) {
+		t.Errorf("keys not in sorted order in output: %s", first)
+	}
+}
+
+// TestStateUpdate_RetryAfterSlackFailure verifies that a state-update whose first
+// Slack post fails is NOT marked as seen, so a second attempt succeeds.
+func TestStateUpdate_RetryAfterSlackFailure(t *testing.T) {
+	store := tw.NewPhoneThreadStore("")
+	_ = store.SetThread("+19165550130", tw.LeadThread{Channel: "#ch", ThreadTS: "ts1"})
+
+	slack := &mockVistaSlack{replyErr: errors.New("slack: temporary failure")}
+	h := newTestVistaHillsHandler(t, slack, store)
+	h.mu.Lock()
+	h.leadPhones[5000] = "+19165550130"
+	h.mu.Unlock()
+
+	payload := LeadStateUpdateRequest{
+		LeadID:    5000,
+		FromState: "new",
+		ToState:   "qualified",
+	}
+
+	// First attempt — Slack fails; key must NOT be marked seen.
+	req1 := postJSON(t, "/vista-hills/lead-state-update", payload, "test-secret")
+	rr1 := httptest.NewRecorder()
+	h.HandleLeadStateUpdate(rr1, req1)
+	if rr1.Code != http.StatusInternalServerError {
+		t.Fatalf("first attempt: status = %d, want 500", rr1.Code)
+	}
+	if len(slack.replies) != 0 {
+		t.Fatalf("no successful replies expected after failed first attempt, got %d", len(slack.replies))
+	}
+
+	// Second attempt — Slack succeeds; should NOT be blocked by idempotency check.
+	slack.replyErr = nil
+	req2 := postJSON(t, "/vista-hills/lead-state-update", payload, "test-secret")
+	rr2 := httptest.NewRecorder()
+	h.HandleLeadStateUpdate(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second attempt: status = %d, want 200", rr2.Code)
+	}
+	if len(slack.replies) != 1 {
+		t.Fatalf("slack replies = %d after successful retry, want 1", len(slack.replies))
+	}
+
+	// Third attempt — should now be blocked (marked seen after second success).
+	req3 := postJSON(t, "/vista-hills/lead-state-update", payload, "test-secret")
+	rr3 := httptest.NewRecorder()
+	h.HandleLeadStateUpdate(rr3, req3)
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("third attempt: status = %d, want 200 (idempotent skip)", rr3.Code)
+	}
+	if len(slack.replies) != 1 {
+		t.Fatalf("slack replies = %d after duplicate third attempt, want 1", len(slack.replies))
+	}
+}
+
+// TestStateUpdate_DistinguishesByFromState verifies that transitions sharing the
+// same to_state but arriving from different from_states are treated as distinct events.
+func TestStateUpdate_DistinguishesByFromState(t *testing.T) {
+	store := tw.NewPhoneThreadStore("")
+	_ = store.SetThread("+19165550131", tw.LeadThread{Channel: "#ch", ThreadTS: "ts2"})
+
+	slack := &mockVistaSlack{}
+	h := newTestVistaHillsHandler(t, slack, store)
+	h.mu.Lock()
+	h.leadPhones[6000] = "+19165550131"
+	h.mu.Unlock()
+
+	transitions := []LeadStateUpdateRequest{
+		{LeadID: 6000, FromState: "new", ToState: "qualified"},
+		{LeadID: 6000, FromState: "qualified", ToState: "new"},
+		{LeadID: 6000, FromState: "contacted", ToState: "qualified"},
+	}
+
+	for i, p := range transitions {
+		req := postJSON(t, "/vista-hills/lead-state-update", p, "test-secret")
+		rr := httptest.NewRecorder()
+		h.HandleLeadStateUpdate(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("transition %d (%s→%s): status = %d, want 200", i+1, p.FromState, p.ToState, rr.Code)
+		}
+	}
+
+	if len(slack.replies) != 3 {
+		t.Errorf("slack replies = %d, want 3 (all distinct from:to pairs delivered)", len(slack.replies))
+	}
+}
+
+// TestNewVistaHillsHandler_RequiresLeadsChannel verifies that the constructor
+// returns an error when no channel is provided via arg or env var.
+func TestNewVistaHillsHandler_RequiresLeadsChannel(t *testing.T) {
+	t.Setenv("SLACK_LEADS_CHANNEL", "")
+
+	slack := &mockVistaSlack{}
+	store := tw.NewPhoneThreadStore("")
+	vh, err := NewVistaHillsHandler(slack, store, "test-secret", "")
+	if err == nil {
+		t.Fatal("expected error when leadsChannel is empty, got nil")
+	}
+	if vh != nil {
+		t.Fatal("expected nil handler on error, got non-nil")
+	}
+	if !strings.Contains(err.Error(), "leadsChannel required") {
+		t.Errorf("expected error to mention 'leadsChannel required', got: %v", err)
+	}
+}

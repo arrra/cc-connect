@@ -47,6 +47,7 @@ type Platform struct {
 	handler               core.MessageHandler
 	shortcutHandler       func(sessionKey, messageText, userID, threadTS string) error
 	bangCmds              map[string]BangCmdFunc
+	bangCmdsMu            sync.RWMutex
 	cancel                context.CancelFunc
 	channelNameCache      map[string]string
 	channelCacheMu        sync.RWMutex
@@ -56,14 +57,19 @@ type Platform struct {
 // RegisterBangCmd registers a handler for a "!<name>" command.
 // Called during app startup to wire Twilio commands into the Slack platform.
 func (p *Platform) RegisterBangCmd(name string, fn BangCmdFunc) {
-	if p.bangCmds == nil {
-		p.bangCmds = make(map[string]BangCmdFunc)
+	key := strings.ToLower(name)
+	p.bangCmdsMu.Lock()
+	defer p.bangCmdsMu.Unlock()
+	if _, exists := p.bangCmds[key]; exists {
+		slog.Warn("slack: bang command already registered, overwriting", "cmd", key)
 	}
-	p.bangCmds[strings.ToLower(name)] = fn
+	p.bangCmds[key] = fn
 }
 
 // HasBangCmd reports whether a bang command with the given name is registered.
 func (p *Platform) HasBangCmd(name string) bool {
+	p.bangCmdsMu.RLock()
+	defer p.bangCmdsMu.RUnlock()
 	return p.bangCmds[strings.ToLower(name)] != nil
 }
 
@@ -87,6 +93,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		bangCmds:              make(map[string]BangCmdFunc),
 		channelNameCache:      make(map[string]string),
 	}, nil
 }
@@ -235,14 +242,17 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				}
 
 				// Dispatch "!<cmd> <args>" bang commands before passing to engine.
-				if len(p.bangCmds) > 0 && strings.HasPrefix(ev.Text, "!") {
+				if strings.HasPrefix(ev.Text, "!") {
 					parts := strings.SplitN(strings.TrimPrefix(ev.Text, "!"), " ", 2)
 					name := strings.ToLower(parts[0])
 					args := ""
 					if len(parts) > 1 {
 						args = parts[1]
 					}
-					if fn, ok := p.bangCmds[name]; ok {
+					p.bangCmdsMu.RLock()
+					fn := p.bangCmds[name]
+					p.bangCmdsMu.RUnlock()
+					if fn != nil {
 						if err := fn(context.Background(), ev.Channel, ev.ThreadTimeStamp, args); err != nil {
 							slog.Error("slack: bang command failed", "cmd", name, "error", err)
 						}

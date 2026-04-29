@@ -48,6 +48,9 @@ func (a *TwilioAdapter) Init() error {
 	if os.Getenv("RECORDING_STATUS_URL") == "" {
 		slog.Warn("[twilio] recording disabled — RECORDING_STATUS_URL not set")
 	}
+	if os.Getenv("TWILIO_WEBHOOK_PUBLIC_BASE_URL") == "" {
+		slog.Warn("[twilio] TWILIO_WEBHOOK_PUBLIC_BASE_URL not set — webhook signature verification falls back to Host+X-Forwarded-Proto reconstruction, which is attacker-controllable; set this env var for canonical, proxy-safe validation")
+	}
 	slog.Info("twilio: adapter initialized", "from", a.fromNumber)
 	return nil
 }
@@ -65,17 +68,22 @@ func (a *TwilioAdapter) HandleInbound(req *http.Request) (Inbound, error) {
 		return Inbound{}, fmt.Errorf("twilio: missing X-Twilio-Signature header")
 	}
 
-	rawURL := req.URL.String()
-	if !req.URL.IsAbs() {
-		scheme := req.Header.Get("X-Forwarded-Proto")
-		if scheme == "" {
-			scheme = "https"
+	var rawURL string
+	if publicBase := os.Getenv("TWILIO_WEBHOOK_PUBLIC_BASE_URL"); publicBase != "" {
+		rawURL = publicBase + req.URL.Path
+	} else {
+		rawURL = req.URL.String()
+		if !req.URL.IsAbs() {
+			scheme := req.Header.Get("X-Forwarded-Proto")
+			if scheme == "" {
+				scheme = "https"
+			}
+			host := req.Host
+			if host == "" {
+				host = req.URL.Host
+			}
+			rawURL = scheme + "://" + host + req.URL.RequestURI()
 		}
-		host := req.Host
-		if host == "" {
-			host = req.URL.Host
-		}
-		rawURL = scheme + "://" + host + req.URL.RequestURI()
 	}
 
 	if !verifyTwilioSignature(a.authToken, rawURL, req.PostForm, sig) {

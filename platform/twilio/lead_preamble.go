@@ -5,7 +5,7 @@ import (
 	"regexp"
 )
 
-const leadPreampleTwiML = `<?xml version="1.0" encoding="UTF-8"?>` +
+const leadPreambleTwiML = `<?xml version="1.0" encoding="UTF-8"?>` +
 	`<Response>` +
 	`<Say voice="alice">This call may be recorded for quality and training purposes.</Say>` +
 	`<Pause length="1"/>` +
@@ -29,5 +29,5 @@ func HandleLeadPreamble(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(leadPreampleTwiML))
+	_, _ = w.Write([]byte(leadPreambleTwiML))
 }

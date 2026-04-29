@@ -137,6 +137,44 @@ func TestWireTwilioBridge_Wired(t *testing.T) {
 	}
 }
 
+// TestWireTwilioBridge_GenericHookNotRegistered verifies that the generic /twilio endpoint
+// (which would be unauthenticated) is NOT registered — POST /twilio returns 404, not 200/4xx.
+// This prevents the unauthenticated handleHook from being reachable on the bridge port.
+func TestWireTwilioBridge_GenericHookNotRegistered(t *testing.T) {
+	port := freeTCPPort(t)
+
+	t.Setenv("TWILIO_ACCOUNT_SID", "ACtest")
+	t.Setenv("TWILIO_AUTH_TOKEN", "testtoken")
+	t.Setenv("TWILIO_FROM_NUMBER", "+15005550006")
+	t.Setenv("TWILIO_BRIDGE_PORT", fmt.Sprintf("%d", port))
+	t.Setenv("SLACK_LEADS_CHANNEL", "#test-leads")
+	t.Setenv("CC_CONNECT_VISTA_HILLS_SECRET", "test-vh-secret")
+
+	p, err := slackplatform.New(map[string]any{
+		"bot_token": "xoxb-test",
+		"app_token": "xapp-test",
+	})
+	if err != nil {
+		t.Fatalf("slackplatform.New: %v", err)
+	}
+
+	srv := wireTwilioBridge([]core.Platform{p}, t.TempDir())
+	if srv == nil {
+		t.Fatal("expected a running WebhookServer; got nil")
+	}
+	t.Cleanup(srv.Stop)
+
+	// POST /twilio (the generic hook path) must return 404, not auth-bypass 200 or 400.
+	resp, err := http.Post(fmt.Sprintf("http://localhost:%d/twilio", port), "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /twilio: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unauthenticated /twilio endpoint, got %d — generic hook must not be registered", resp.StatusCode)
+	}
+}
+
 // TestWireTwilioBridge_SkipsWhenNoLeadsChannel verifies that when SLACK_LEADS_CHANNEL is unset
 // the bridge returns nil without crashing — no fail-open fallback to a hardcoded channel.
 func TestWireTwilioBridge_SkipsWhenNoLeadsChannel(t *testing.T) {

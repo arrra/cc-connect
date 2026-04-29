@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 )
 
 // SlackPoster posts messages to Slack on behalf of the inbound router.
@@ -28,16 +27,6 @@ type InboundRouter struct {
 	slack        SlackPoster
 	store        *PhoneThreadStore
 	leadsChannel string
-}
-
-// escapeSlackText escapes user-supplied text before posting to Slack to prevent
-// mention injection (<@U123>, <!channel>, <#C123>) and markdown rendering.
-// Follows Slack's documented escaping rules: https://api.slack.com/reference/surfaces/formatting#escaping
-func escapeSlackText(text string) string {
-	text = strings.ReplaceAll(text, "&", "&amp;")
-	text = strings.ReplaceAll(text, "<", "&lt;")
-	text = strings.ReplaceAll(text, ">", "&gt;")
-	return text
 }
 
 // NewInboundRouter creates an InboundRouter.
@@ -77,7 +66,7 @@ func (r *InboundRouter) HandleInbound(w http.ResponseWriter, req *http.Request) 
 
 	ctx := req.Context()
 	thread, known := r.store.GetThread(inbound.From)
-	safeBody := escapeSlackText(inbound.Body)
+	safeBody := EscapeSlackText(inbound.Body)
 
 	var threadTS string
 	if known {

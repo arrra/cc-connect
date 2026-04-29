@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,13 +11,6 @@ import (
 	"github.com/chenhg5/cc-connect/platform/slack/commands"
 	"github.com/chenhg5/cc-connect/platform/twilio"
 )
-
-// twilioBridgePoster is the subset of Slack platform methods needed by the Twilio bridge.
-// *slackplatform.Platform satisfies this interface.
-type twilioBridgePoster interface {
-	PostMessage(ctx context.Context, channelID, text string) (string, error)
-	PostReply(ctx context.Context, channelID, threadTS, text string) error
-}
 
 // wireTwilioBridge initializes the Twilio bridge when TWILIO_ACCOUNT_SID is set.
 // Returns the running WebhookServer so the caller can Stop() it on shutdown,
@@ -75,7 +67,7 @@ func wireTwilioBridge(platforms []core.Platform, dataDir string) *core.WebhookSe
 	secret := os.Getenv("CC_CONNECT_VISTA_HILLS_SECRET")
 	vh, vhErr := slackplatform.NewVistaHillsHandler(slackPlat, store, secret, leadsChannel)
 	if vhErr != nil {
-		slog.Warn("VistaHills bridge disabled — CC_CONNECT_VISTA_HILLS_SECRET not set")
+		slog.Warn("VistaHills bridge disabled", "error", vhErr)
 	}
 
 	// Bang commands wired onto the Slack platform.
@@ -100,6 +92,10 @@ func wireTwilioBridge(platforms []core.Platform, dataDir string) *core.WebhookSe
 		}
 	}
 	srv := core.NewWebhookServer(port, "", "/twilio")
+	// The Twilio bridge uses only specific authenticated routes; the generic
+	// handleHook endpoint would be unauthenticated (empty token) and has no
+	// engines registered. Disable it so /twilio returns 404 for unknown paths.
+	srv.NoGenericHook = true
 	srv.Handle("/twilio/inbound-sms", inboundRouter.HandleInbound)
 	srv.Handle("/twilio/lead-preamble", twilio.HandleLeadPreamble)
 

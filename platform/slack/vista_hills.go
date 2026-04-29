@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,11 +54,12 @@ type VistaHillsHandler struct {
 
 	mu          sync.RWMutex
 	leadPhones  map[int64]string    // lead_id → E.164 phone (populated by lead-created)
-	seenUpdates map[string]struct{} // "lead_id:to_state" idempotency set
+	seenUpdates map[string]struct{} // "lead_id:from_state:to_state" idempotency set; marked after success
 }
 
 // NewVistaHillsHandler creates a VistaHillsHandler.
-// leadsChannel defaults to $SLACK_LEADS_CHANNEL or "#chief-of-staff" if empty.
+// leadsChannel defaults to $SLACK_LEADS_CHANNEL if empty; returns an error when
+// neither is provided — a missing channel would risk leaking PII to the wrong channel.
 // secret falls back to $CC_CONNECT_WEBHOOK_SECRET if the arg is empty.
 // Returns an error if no secret is available — an empty secret would make the
 // endpoint accept all requests (fail-open), which is a security violation.
@@ -71,7 +74,7 @@ func NewVistaHillsHandler(slack vistaSlackPoster, store *tw.PhoneThreadStore, se
 		leadsChannel = os.Getenv("SLACK_LEADS_CHANNEL")
 	}
 	if leadsChannel == "" {
-		leadsChannel = "#chief-of-staff"
+		return nil, fmt.Errorf("leadsChannel required: pass non-empty leadsChannel or set SLACK_LEADS_CHANNEL")
 	}
 	return &VistaHillsHandler{
 		slack:        slack,
@@ -168,16 +171,16 @@ func (h *VistaHillsHandler) HandleLeadStateUpdate(w http.ResponseWriter, r *http
 	}
 
 	// Idempotency: skip duplicate transitions.
-	idempKey := fmt.Sprintf("%d:%s", req.LeadID, req.ToState)
-	h.mu.Lock()
+	// Key includes from_state so that a→b and c→b are distinct transitions.
+	// We check before posting, but mark seen only after success so retries work.
+	idempKey := fmt.Sprintf("%d:%s:%s", req.LeadID, req.FromState, req.ToState)
+	h.mu.RLock()
 	_, seen := h.seenUpdates[idempKey]
-	if !seen {
-		h.seenUpdates[idempKey] = struct{}{}
-	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	if seen {
 		slog.Debug("[vista-hills] lead-state-update duplicate, skipped",
 			"lead_id", req.LeadID,
+			"from_state", req.FromState,
 			"to_state", req.ToState,
 		)
 		w.WriteHeader(http.StatusOK)
@@ -219,6 +222,11 @@ func (h *VistaHillsHandler) HandleLeadStateUpdate(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Mark seen only after Slack post succeeds so retries can recover from transient failures.
+	h.mu.Lock()
+	h.seenUpdates[idempKey] = struct{}{}
+	h.mu.Unlock()
+
 	slog.Info("[vista-hills] lead-state-update",
 		"lead_id", req.LeadID,
 		"phone", maskPhoneVH(phone),
@@ -257,12 +265,12 @@ func (h *VistaHillsHandler) formatLeadBlock(req LeadCreatedRequest) string {
 		source = "unknown"
 	}
 
-	line1 := fmt.Sprintf("🎯 New %s lead — %s", source, req.Name)
+	line1 := fmt.Sprintf("🎯 New %s lead — %s", tw.EscapeSlackText(source), tw.EscapeSlackText(req.Name))
 	line2 := fmt.Sprintf("📞 %s", formatPhoneVH(req.Phone))
 	if req.Email != "" {
-		line2 += " | " + req.Email
+		line2 += " | " + tw.EscapeSlackText(req.Email)
 	}
-	line3 := fmt.Sprintf("🕐 %s | Source: %s", localTime, req.Campaign)
+	line3 := fmt.Sprintf("🕐 %s | Campaign: %s", localTime, tw.EscapeSlackText(req.Campaign))
 	line4 := "Status: AI texting now…"
 
 	return line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
@@ -278,13 +286,18 @@ func (h *VistaHillsHandler) formatStateUpdate(req LeadStateUpdateRequest) string
 		icon = "📅"
 	}
 
-	text := fmt.Sprintf("%s Lead %s → %s", icon, req.FromState, req.ToState)
+	text := fmt.Sprintf("%s Lead %s → %s", icon, tw.EscapeSlackText(req.FromState), tw.EscapeSlackText(req.ToState))
 	if len(req.QualifyingData) > 0 {
-		parts := make([]string, 0, len(req.QualifyingData))
-		for k, v := range req.QualifyingData {
-			parts = append(parts, fmt.Sprintf("%s: %v", k, v))
+		keys := make([]string, 0, len(req.QualifyingData))
+		for k := range req.QualifyingData {
+			keys = append(keys, k)
 		}
-		text += " — " + joinStrings(parts, ", ")
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s: %v", tw.EscapeSlackText(k), tw.EscapeSlackText(fmt.Sprintf("%v", req.QualifyingData[k]))))
+		}
+		text += " — " + strings.Join(parts, ", ")
 	}
 	return text
 }
@@ -314,15 +327,4 @@ func maskPhoneVH(phone string) string {
 		mask += "*"
 	}
 	return phone[:3] + mask + phone[len(phone)-4:]
-}
-
-func joinStrings(ss []string, sep string) string {
-	if len(ss) == 0 {
-		return ""
-	}
-	out := ss[0]
-	for _, s := range ss[1:] {
-		out += sep + s
-	}
-	return out
 }

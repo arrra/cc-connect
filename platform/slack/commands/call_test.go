@@ -288,7 +288,10 @@ func TestCmdCall_TwiMLRecordingCallback(t *testing.T) {
 // TestBuildCallTwiML_PreambleBeforeDial is a focused unit test for the TwiML builder.
 func TestBuildCallTwiML_PreambleBeforeDial(t *testing.T) {
 	const preambleURL = "https://example.com/twilio/lead-preamble"
-	twiml := buildCallTwiML("+19165550123", preambleURL, "")
+	twiml, err := buildCallTwiML("+19165550123", preambleURL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	const preamble = "This call may be recorded for quality and training purposes."
 	if !strings.Contains(twiml, preamble) {
@@ -371,7 +374,10 @@ func TestBuildCallTwiML_XMLInjectionPrevented(t *testing.T) {
 	// This phone would break TwiML if unescaped: closing the element and injecting new ones.
 	injectedPhone := `+1234567890"><Redirect>evil</Redirect><Number`
 	preambleURL := "https://example.com/twilio/lead-preamble"
-	twiml := buildCallTwiML(injectedPhone, preambleURL, "")
+	twiml, err := buildCallTwiML(injectedPhone, preambleURL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// The raw injection string must not appear verbatim in the output.
 	if strings.Contains(twiml, "<Redirect>") {
@@ -390,7 +396,10 @@ func TestBuildCallTwiML_XMLSpecialCharsEscaped(t *testing.T) {
 	// Craft a phone containing XML special chars.
 	phone := `+12345&<>"678`
 	preambleURL := "https://example.com/twilio/lead-preamble"
-	twiml := buildCallTwiML(phone, preambleURL, "")
+	twiml, err := buildCallTwiML(phone, preambleURL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Raw special chars must not appear unescaped in the element content.
 	// Find the <Number ...> element.
@@ -413,6 +422,59 @@ func TestBuildCallTwiML_XMLSpecialCharsEscaped(t *testing.T) {
 	// The escaped amp must appear somewhere in the number element.
 	if !strings.Contains(numberElem, "&amp;") {
 		t.Errorf("<Number> element should contain &amp; for &; got:\n%s", numberElem)
+	}
+}
+
+// TestBuildCallTwiML_RecordingCallbackEscaped verifies that a recordingStatusCallback URL
+// containing '&' is XML-attribute-escaped so the TwiML is well-formed.
+func TestBuildCallTwiML_RecordingCallbackEscaped(t *testing.T) {
+	const leadPhone = "+19165550123"
+	const preambleURL = "https://example.com/preamble"
+	const callbackURL = "https://x.com/cb?lead=%2B1&signature=abc"
+
+	twiml, err := buildCallTwiML(leadPhone, preambleURL, callbackURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The raw & must not appear as a bare ampersand inside an attribute value.
+	// We want &amp; in the attribute, not the literal &.
+	if strings.Contains(twiml, `recordingStatusCallback="https://x.com/cb?lead=%2B1&signature=abc"`) {
+		t.Errorf("TwiML contains unescaped & in recordingStatusCallback attribute; got:\n%s", twiml)
+	}
+	if !strings.Contains(twiml, "&amp;") {
+		t.Errorf("TwiML should contain &amp; for escaped & in recordingStatusCallback; got:\n%s", twiml)
+	}
+}
+
+// TestXMLEscapeAttr verifies that xmlEscapeAttr escapes all five XML attribute special chars.
+func TestXMLEscapeAttr(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"hello", "hello"},
+		{"a&b", "a&amp;b"},
+		{"a<b", "a&lt;b"},
+		{"a>b", "a&gt;b"},
+		{`a"b`, "a&quot;b"},
+		{"a'b", "a&#39;b"},
+		// Real-world URL with & in query string — the critical attribute case.
+		{
+			"https://x.com/cb?lead=%2B1&signature=abc",
+			"https://x.com/cb?lead=%2B1&amp;signature=abc",
+		},
+		// All five special chars at once.
+		{
+			`&<>"'`,
+			"&amp;&lt;&gt;&quot;&#39;",
+		},
+	}
+	for _, tc := range cases {
+		got := xmlEscapeAttr(tc.input)
+		if got != tc.want {
+			t.Errorf("xmlEscapeAttr(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 
@@ -446,5 +508,39 @@ func TestIsValidE164(t *testing.T) {
 		if isValidE164(p) {
 			t.Errorf("isValidE164(%q) = true, want false", p)
 		}
+	}
+}
+
+// TestPreambleURL_AppendsToExistingQuery verifies that a preamble URL that already
+// contains query parameters has the lead param added (not replacing existing params).
+func TestPreambleURL_AppendsToExistingQuery(t *testing.T) {
+	const phone = "+19165550123"
+	twiml, err := buildCallTwiML(phone, "https://host/path?existing=1", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(twiml, "existing=1") {
+		t.Errorf("TwiML should preserve existing query param; got:\n%s", twiml)
+	}
+	if !strings.Contains(twiml, "lead=") {
+		t.Errorf("TwiML should contain lead param; got:\n%s", twiml)
+	}
+}
+
+// TestPreambleURL_HandlesFragment verifies that a preamble URL with a fragment
+// component is handled correctly (fragment preserved in output).
+func TestPreambleURL_HandlesFragment(t *testing.T) {
+	const phone = "+19165550123"
+	twiml, err := buildCallTwiML(phone, "https://host/path#anchor", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(twiml, "anchor") {
+		t.Errorf("TwiML should preserve URL fragment; got:\n%s", twiml)
+	}
+	if !strings.Contains(twiml, "lead=") {
+		t.Errorf("TwiML should contain lead param; got:\n%s", twiml)
 	}
 }

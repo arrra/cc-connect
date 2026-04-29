@@ -18,11 +18,34 @@ var e164Re = regexp.MustCompile(`^\+[0-9]{6,15}$`)
 // isValidE164 reports whether s is a valid E.164 phone number.
 func isValidE164(s string) bool { return e164Re.MatchString(s) }
 
-// xmlEscape XML-encodes s so it is safe to embed in XML element content or attributes.
+// xmlEscape XML-encodes s for XML element text content (not attributes — use xmlEscapeAttr for that).
 func xmlEscape(s string) string {
 	var buf bytes.Buffer
 	_ = xml.EscapeText(&buf, []byte(s))
 	return buf.String()
+}
+
+// xmlEscapeAttr XML-encodes s for use inside an XML attribute value (double-quoted).
+// xml.EscapeText does not escape '"', making it unsafe for attributes.
+func xmlEscapeAttr(s string) string {
+	var sb strings.Builder
+	for _, r := range s {
+		switch r {
+		case '&':
+			sb.WriteString("&amp;")
+		case '<':
+			sb.WriteString("&lt;")
+		case '>':
+			sb.WriteString("&gt;")
+		case '"':
+			sb.WriteString("&quot;")
+		case '\'':
+			sb.WriteString("&#39;")
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }
 
 // CallInitiator initiates a click-to-call with inline TwiML.
@@ -80,7 +103,12 @@ func (c *CallCmd) Handle(ctx context.Context, channel, threadTS, args string) er
 			"⚠️ Recording is disabled (RECORDING_STATUS_URL not configured). Set the env var to enable recording before placing calls.")
 		return fmt.Errorf("!call: RECORDING_STATUS_URL not set")
 	}
-	twiml := buildCallTwiML(phone, preambleURL, recordingCB)
+	twiml, err := buildCallTwiML(phone, preambleURL, recordingCB)
+	if err != nil {
+		_ = c.Slack.PostReply(ctx, channel, threadTS,
+			fmt.Sprintf("⚠️ Invalid TWILIO_LEAD_PREAMBLE_URL: %v", err))
+		return err
+	}
 
 	callSid, err := c.Twilio.InitiateCallWithTwiML(phone, twiml)
 	if err != nil {
@@ -114,7 +142,16 @@ func (c *CallCmd) Handle(ctx context.Context, channel, threadTS, args string) er
 //   - Calling leg (agent) hears the <Say> preamble before <Dial>.
 //   - Called leg (lead) hears the preamble served by preambleURL via <Number url="...">.
 //   - answerOnBridge="true" prevents the lead from hearing ringing audio prematurely.
-func buildCallTwiML(leadPhone, preambleURL, recordingStatusCallback string) string {
+func buildCallTwiML(leadPhone, preambleURL, recordingStatusCallback string) (string, error) {
+	u, err := url.Parse(preambleURL)
+	if err != nil {
+		return "", fmt.Errorf("!call: malformed TWILIO_LEAD_PREAMBLE_URL %q: %w", preambleURL, err)
+	}
+	q := u.Query()
+	q.Set("lead", leadPhone)
+	u.RawQuery = q.Encode()
+	numberURL := u.String()
+
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	sb.WriteString("<Response>")
@@ -123,14 +160,13 @@ func buildCallTwiML(leadPhone, preambleURL, recordingStatusCallback string) stri
 	if recordingStatusCallback != "" {
 		sb.WriteString(fmt.Sprintf(
 			` record="record-from-answer" recordingStatusCallback="%s"`,
-			recordingStatusCallback,
+			xmlEscapeAttr(recordingStatusCallback),
 		))
 	}
 	sb.WriteString(">")
-	numberURL := preambleURL + "?lead=" + url.QueryEscape(leadPhone)
 	// XML-escape both the attribute value and element content as defense in depth.
-	sb.WriteString(fmt.Sprintf(`<Number url="%s">%s</Number>`, xmlEscape(numberURL), xmlEscape(leadPhone)))
+	sb.WriteString(fmt.Sprintf(`<Number url="%s">%s</Number>`, xmlEscapeAttr(numberURL), xmlEscape(leadPhone)))
 	sb.WriteString("</Dial>")
 	sb.WriteString("</Response>")
-	return sb.String()
+	return sb.String(), nil
 }

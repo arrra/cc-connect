@@ -334,9 +334,9 @@ func TestEscapeSlackText(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escapeSlackText(tc.input)
+			got := EscapeSlackText(tc.input)
 			if got != tc.want {
-				t.Errorf("escapeSlackText(%q) = %q, want %q", tc.input, got, tc.want)
+				t.Errorf("EscapeSlackText(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}

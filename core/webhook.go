@@ -17,13 +17,14 @@ import (
 // WebhookServer exposes an HTTP endpoint for external systems
 // (git hooks, CI/CD, file watchers, etc.) to trigger agent or shell actions.
 type WebhookServer struct {
-	port        int
-	token       string
-	path        string
-	server      *http.Server
-	engines     map[string]*Engine
-	mu          sync.RWMutex
-	extraRoutes map[string]http.HandlerFunc
+	port           int
+	token          string
+	path           string
+	server         *http.Server
+	engines        map[string]*Engine
+	mu             sync.RWMutex
+	extraRoutes    map[string]http.HandlerFunc
+	NoGenericHook  bool // when true, the generic handleHook endpoint is not registered
 }
 
 // WebhookRequest is the JSON body for POST /hook.
@@ -73,7 +74,9 @@ func (ws *WebhookServer) Handle(pattern string, handler http.HandlerFunc) {
 
 func (ws *WebhookServer) Start() {
 	mux := http.NewServeMux()
-	mux.HandleFunc(ws.path, ws.handleHook)
+	if !ws.NoGenericHook {
+		mux.HandleFunc(ws.path, ws.handleHook)
+	}
 	ws.mu.RLock()
 	for pattern, h := range ws.extraRoutes {
 		mux.HandleFunc(pattern, h)

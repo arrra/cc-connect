@@ -271,6 +271,68 @@ func TestHandleInbound_ProxyRequestDefaultsToHTTPS(t *testing.T) {
 	}
 }
 
+// TestSignatureWithPublicBaseURL verifies that when TWILIO_WEBHOOK_PUBLIC_BASE_URL is set,
+// HandleInbound uses it as the canonical URL for signature verification (ignoring Host headers).
+func TestSignatureWithPublicBaseURL(t *testing.T) {
+	const (
+		publicBase = "https://cc.example.com"
+		path       = "/twilio/inbound-sms"
+		authToken  = "secret"
+	)
+	t.Setenv("TWILIO_WEBHOOK_PUBLIC_BASE_URL", publicBase)
+
+	params := smsParams("+19165550123", "SM020", "public base url test")
+	canonicalURL := publicBase + path
+	sig := computeSig(authToken, canonicalURL, params)
+
+	// Send request with a different Host — the env var should take precedence.
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(params.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", sig)
+	req.Host = "attacker-controlled.example.com"
+
+	a := &TwilioAdapter{authToken: authToken}
+	inbound, err := a.HandleInbound(req)
+	if err != nil {
+		t.Fatalf("unexpected error with TWILIO_WEBHOOK_PUBLIC_BASE_URL set: %v", err)
+	}
+	if inbound.From != "+19165550123" {
+		t.Errorf("From = %q, want +19165550123", inbound.From)
+	}
+}
+
+// TestSignatureFallbackWithoutPublicBaseURL verifies that the existing Host+X-Forwarded-Proto
+// fallback still works when TWILIO_WEBHOOK_PUBLIC_BASE_URL is not set.
+func TestSignatureFallbackWithoutPublicBaseURL(t *testing.T) {
+	const (
+		proxyHost = "webhook.example.com"
+		path      = "/twilio/inbound-sms"
+		scheme    = "https"
+		authToken = "secret"
+	)
+	// Ensure env var is absent.
+	t.Setenv("TWILIO_WEBHOOK_PUBLIC_BASE_URL", "")
+
+	params := smsParams("+19165550456", "SM021", "fallback test")
+	reconstructed := scheme + "://" + proxyHost + path
+	sig := computeSig(authToken, reconstructed, params)
+
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(params.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", sig)
+	req.Header.Set("X-Forwarded-Proto", scheme)
+	req.Host = proxyHost
+
+	a := &TwilioAdapter{authToken: authToken}
+	inbound, err := a.HandleInbound(req)
+	if err != nil {
+		t.Fatalf("unexpected error for fallback path: %v", err)
+	}
+	if inbound.MessageSID != "SM021" {
+		t.Errorf("MessageSID = %q, want SM021", inbound.MessageSID)
+	}
+}
+
 func TestHandleInbound_TamperedBody(t *testing.T) {
 	const rawURL = "https://example.com/twilio/inbound-sms"
 	const authToken = "secret"
