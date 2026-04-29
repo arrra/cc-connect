@@ -1,9 +1,11 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/slack-go/slack/slackevents"
@@ -194,5 +196,44 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 	})
 	if len(docs) != 1 || docs[0].MimeType != "application/octet-stream" {
 		t.Fatalf("got %+v", docs)
+	}
+}
+
+// TestBangCmdsMutex_ConcurrentRegisterAndDispatch verifies that concurrent
+// RegisterBangCmd and handleEvent calls on bangCmds are race-free.
+func TestBangCmdsMutex_ConcurrentRegisterAndDispatch(t *testing.T) {
+	p := &Platform{
+		bangCmds: make(map[string]BangCmdFunc),
+	}
+
+	var wg sync.WaitGroup
+
+	// Concurrent writers: register bang commands.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		name := "cmd" + string(rune('a'+i))
+		go func(n string) {
+			defer wg.Done()
+			p.RegisterBangCmd(n, func(ctx context.Context, channel, threadTS, args string) error { return nil })
+		}(name)
+	}
+
+	// Concurrent readers: check HasBangCmd.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.HasBangCmd("cmda")
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify all commands were registered.
+	for i := 0; i < 20; i++ {
+		name := "cmd" + string(rune('a'+i))
+		if !p.HasBangCmd(name) {
+			t.Errorf("expected bang cmd %q to be registered", name)
+		}
 	}
 }
