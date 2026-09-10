@@ -209,7 +209,7 @@ func (s *APIServer) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	engine, ok := s.engines[req.Project]
 	s.mu.RUnlock()
 
-	if !ok {
+	if !ok && req.Project == "" {
 		// If only one engine, use it by default
 		s.mu.RLock()
 		if len(s.engines) == 1 {
