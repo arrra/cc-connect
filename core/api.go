@@ -239,6 +239,10 @@ func (s *APIServer) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := engine.InjectPrompt(req.SessionKey, req.Message, req.From); err != nil {
+		if errors.Is(err, ErrInvalidTarget) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

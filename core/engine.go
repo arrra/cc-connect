@@ -932,10 +932,16 @@ func (e *Engine) resolvePlatformForSessionKey(sessionKey string) (Platform, stri
 		}
 	}
 	if targetPlatform == nil {
-		return nil, "", "", fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+		return nil, "", "", fmt.Errorf("%w: platform %q not found for session %q", ErrInvalidTarget, platformName, sessionKey)
 	}
 	return targetPlatform, platformName, sessionKey, nil
 }
+
+// ErrInvalidTarget marks a prompt/message target that failed validation
+// (e.g. an unknown platform prefix in a session key), as opposed to an
+// internal failure. Callers such as the API server use errors.Is to map it
+// to a 4xx response instead of a 500.
+var ErrInvalidTarget = errors.New("invalid target")
 
 // ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
 // It finds the platform that owns the session key, reconstructs a reply context,
