@@ -64,6 +64,9 @@ func main() {
 		case "send":
 			runSend(os.Args[2:])
 			return
+		case "prompt":
+			runPrompt(os.Args[2:])
+			return
 		case "cron":
 			runCron(os.Args[2:])
 			return
@@ -1224,6 +1227,8 @@ Commands:
 
   send               Send a message to an active session via internal API
                      (-m <text> | --stdin, -p <project>, -s <session>)
+  prompt             Inject an agent prompt into a project session via internal API
+                     (-m <text> | --stdin, -p <project>, -s <session>, --from <name>)
 
   cron               Manage scheduled tasks
     add              Create a scheduled task (-c <expr> --prompt <text>)
