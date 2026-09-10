@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,9 +10,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
+
+// maxPromptBodyBytes bounds the size of a POST /prompt request body before
+// JSON decoding, so an oversized payload is rejected (413) instead of being
+// buffered and decoded in full.
+const maxPromptBodyBytes = 1 << 20 // 1 MiB
 
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
@@ -33,6 +40,14 @@ type SendRequest struct {
 	Message    string            `json:"message"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+}
+
+// PromptRequest is the JSON body for POST /prompt.
+type PromptRequest struct {
+	Project    string `json:"project"`
+	SessionKey string `json:"session_key"`
+	Message    string `json:"message"`
+	From       string `json:"from,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -62,6 +77,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		engines:    make(map[string]*Engine),
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/prompt", s.handlePrompt)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -173,6 +189,65 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePrompt injects text into a project's session as an agent prompt
+// (as opposed to /send, which only posts outbound text to the platform).
+// It is the internal-API entry point hex-events uses to escalate into a
+// session without being dropped as a bot-authored platform event.
+func (s *APIServer) handlePrompt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PromptRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxPromptBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" || req.SessionKey == "" {
+		http.Error(w, "session_key and message are required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	engine, ok := s.engines[req.Project]
+	s.mu.RUnlock()
+
+	if !ok && req.Project == "" {
+		// If only one engine, use it by default
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for _, e := range s.engines {
+				engine = e
+				ok = true
+			}
+		}
+		s.mu.RUnlock()
+	}
+
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	if err := engine.InjectPrompt(req.SessionKey, req.Message, req.From); err != nil {
+		if errors.Is(err, ErrInvalidTarget) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {

@@ -149,6 +149,7 @@ type resultAgentSession struct {
 	events      chan Event
 	result      string
 	sendOnce    sync.Once
+	mu          sync.Mutex // guards sentPrompts against the async handleMessage goroutine
 	sentPrompts []string
 }
 
@@ -160,11 +161,22 @@ func newResultAgentSession(result string) *resultAgentSession {
 }
 
 func (s *resultAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.mu.Unlock()
 	s.sendOnce.Do(func() {
 		s.events <- Event{Type: EventResult, Content: s.result, Done: true}
 	})
 	return nil
+}
+
+// SentPrompts returns a snapshot of prompts delivered to Send. Test-only
+// accessor: safe to call concurrently with the async goroutine that
+// handleMessage/processInteractiveMessageWith dispatch for InjectPrompt.
+func (s *resultAgentSession) SentPrompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sentPrompts...)
 }
 
 func (s *resultAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
@@ -9728,5 +9740,80 @@ func TestDeriveRootObjective_StripsAndTruncates(t *testing.T) {
 				t.Errorf("deriveRootObjective(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// pollUntil polls cond every 5ms until it returns true or timeout elapses.
+// Used to observe effects of the async goroutine that handleMessage
+// dispatches (`go e.processInteractiveMessageWith(...)`), instead of a
+// fixed sleep guess.
+func pollUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestInjectPrompt_UnknownPlatformPrefix pins InjectPrompt's platform
+// resolution: a session key whose prefix matches no registered platform must
+// fail loud, naming the platform it could not find (mirrors
+// ExecuteCronJob's "platform %q not found for session %q" behavior).
+func TestInjectPrompt_UnknownPlatformPrefix(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	defer e.cancel()
+
+	err := e.InjectPrompt("bogus:channel-1", "hello", "")
+	if err == nil {
+		t.Fatal("InjectPrompt() error = nil, want error for unknown platform prefix")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("InjectPrompt() error = %q, want it to mention platform %q", err.Error(), "bogus")
+	}
+}
+
+// TestInjectPrompt_DefaultsFromToHexEvents pins InjectPrompt's "from" default:
+// an empty `from` must resolve to "hex-events" for both Message.UserID and
+// Message.UserName. Observed via SetInjectSender(true), which makes
+// buildSenderPrompt embed sender_id/sender_name into the prompt actually
+// delivered to the agent session (core/engine.go:11269).
+func TestInjectPrompt_DefaultsFromToHexEvents(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("ack")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.SetInjectSender(true)
+
+	if err := e.InjectPrompt("discord:channel-1:user-1", "hello there", ""); err != nil {
+		t.Fatalf("InjectPrompt() error = %v", err)
+	}
+
+	if platform.reconstructSessionKey != "discord:channel-1:user-1" {
+		t.Fatalf("ReconstructReplyCtx sessionKey = %q, want %q", platform.reconstructSessionKey, "discord:channel-1:user-1")
+	}
+
+	pollUntil(t, 2*time.Second, func() bool {
+		return len(agentSession.SentPrompts()) > 0
+	})
+
+	prompts := agentSession.SentPrompts()
+	if len(prompts) != 1 {
+		t.Fatalf("sent prompts = %#v, want exactly 1", prompts)
+	}
+	if !strings.Contains(prompts[0], "sender_id=hex-events") {
+		t.Fatalf("prompt = %q, want it to embed sender_id=hex-events (default UserID)", prompts[0])
+	}
+	if !strings.Contains(prompts[0], `sender_name="hex-events"`) {
+		t.Fatalf("prompt = %q, want it to embed sender_name=\"hex-events\" (default UserName)", prompts[0])
 	}
 }
