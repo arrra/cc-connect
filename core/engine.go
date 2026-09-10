@@ -899,11 +899,12 @@ func (e *Engine) ActiveSessionKeys() []string {
 	return keys
 }
 
-// ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
-// It finds the platform that owns the session key, reconstructs a reply context,
-// and processes the message as if the user sent it.
-func (e *Engine) ExecuteCronJob(job *CronJob) error {
-	sessionKey := job.SessionKey
+// resolvePlatformForSessionKey finds the platform that owns a session key by
+// its prefix (e.g. "slack:C123"), falling back to stripping a workspace-path
+// prefix in multi-workspace mode (e.g. "/home/user/project:slack:C123:U456").
+// Shared by ExecuteCronJob and InjectPrompt. Returns the resolved platform,
+// its name, and the session key with any workspace prefix stripped.
+func (e *Engine) resolvePlatformForSessionKey(sessionKey string) (Platform, string, string, error) {
 	platformName := ""
 	if idx := strings.Index(sessionKey, ":"); idx > 0 {
 		platformName = sessionKey[:idx]
@@ -931,7 +932,18 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 	if targetPlatform == nil {
-		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+		return nil, "", "", fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+	}
+	return targetPlatform, platformName, sessionKey, nil
+}
+
+// ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
+// It finds the platform that owns the session key, reconstructs a reply context,
+// and processes the message as if the user sent it.
+func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	targetPlatform, platformName, sessionKey, err := e.resolvePlatformForSessionKey(job.SessionKey)
+	if err != nil {
+		return err
 	}
 
 	rc, ok := targetPlatform.(ReplyContextReconstructor)
@@ -941,7 +953,6 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	runSessionKey := sessionKey
 	var replyCtx any
-	var err error
 	if !job.Mute {
 		if resolver, ok := targetPlatform.(CronReplyTargetResolver); ok {
 			resolvedSessionKey, resolvedReplyCtx, err := resolver.ResolveCronReplyTarget(sessionKey, cronRunTitle(job))
@@ -1070,6 +1081,50 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		iKey = workspaceDir + ":" + sessionKey
 	}
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	return nil
+}
+
+// InjectPrompt delivers content into a project's session as an agent prompt,
+// exactly as if a user had typed it, via the same handleMessage entry every
+// platform uses. It is the internal-API/hex-events counterpart to
+// ExecuteCronJob: it resolves the platform from the session-key prefix,
+// reconstructs a reply context, and dispatches the message. handleMessage
+// runs the turn asynchronously and queues on a busy session, so InjectPrompt
+// does not lock sessions itself.
+func (e *Engine) InjectPrompt(sessionKey, content, from string) error {
+	if content == "" {
+		return fmt.Errorf("content is required")
+	}
+	if from == "" {
+		from = "hex-events"
+	}
+
+	targetPlatform, platformName, strippedKey, err := e.resolvePlatformForSessionKey(sessionKey)
+	if err != nil {
+		return err
+	}
+
+	rc, ok := targetPlatform.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("platform %q does not support prompt injection", platformName)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(strippedKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+
+	msg := &Message{
+		SessionKey: strippedKey,
+		Platform:   platformName,
+		UserID:     from,
+		UserName:   from,
+		Content:    content,
+		ReplyCtx:   replyCtx,
+		MessageID:  fmt.Sprintf("prompt-%d", time.Now().UnixNano()),
+	}
+
+	e.handleMessage(targetPlatform, msg)
 	return nil
 }
 
