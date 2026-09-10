@@ -87,6 +87,97 @@ func TestHandlePrompt_UnknownProject(t *testing.T) {
 	}
 }
 
+// TestHandlePrompt_UnknownProjectSingleEngineExplicit pins F1: with exactly
+// one engine registered, an EXPLICITLY named project that matches no engine
+// must still 404 — the single-engine fallback may only kick in when the
+// caller omitted the project, never when they named the wrong one.
+func TestHandlePrompt_UnknownProjectSingleEngineExplicit(t *testing.T) {
+	engine := NewEngine("alpha", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "alpha"}}}, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"alpha": engine}}
+
+	reqBody := PromptRequest{Project: "gamma", SessionKey: "alpha:channel-1", Message: "hello"}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePrompt(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s, want %d", rec.Code, rec.Body.String(), http.StatusNotFound)
+	}
+}
+
+// TestHandlePrompt_OmittedProjectSingleEngineFallsBack pins the flip side of
+// F1: with exactly one engine registered, an OMITTED project still falls
+// back to that engine (this must keep working after the F1 fix).
+func TestHandlePrompt_OmittedProjectSingleEngineFallsBack(t *testing.T) {
+	engine := NewEngine("alpha", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "alpha"}}}, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"alpha": engine}}
+
+	reqBody := PromptRequest{SessionKey: "alpha:channel-1", Message: "hello"}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePrompt(rec, req)
+
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s, want fallback to succeed (not 404)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandlePrompt_RejectsOversizedBody pins F5: the request body must be
+// bounded (http.MaxBytesReader) before decoding, so an oversized POST /prompt
+// body is rejected with 413 instead of being decoded in full.
+func TestHandlePrompt_RejectsOversizedBody(t *testing.T) {
+	engine := NewEngine("alpha", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "alpha"}}}, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"alpha": engine}}
+
+	huge := strings.Repeat("x", 2<<20) // 2 MiB, above the intended 1 MiB cap
+	reqBody := PromptRequest{Project: "alpha", SessionKey: "alpha:channel-1", Message: huge}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePrompt(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body=%s, want %d", rec.Code, rec.Body.String(), http.StatusRequestEntityTooLarge)
+	}
+}
+
+// TestHandlePrompt_InvalidTargetReturns4xx pins F8: an invalid prompt target
+// (unknown platform prefix in the session key) is a caller/validation error,
+// not a server failure, so it must map to a 4xx status — not the blanket 500
+// handlePrompt currently returns for every InjectPrompt error.
+func TestHandlePrompt_InvalidTargetReturns4xx(t *testing.T) {
+	engine := NewEngine("alpha", &stubAgent{}, []Platform{&stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "alpha"}}}, "", LangEnglish)
+	api := &APIServer{engines: map[string]*Engine{"alpha": engine}}
+
+	reqBody := PromptRequest{Project: "alpha", SessionKey: "bogus:channel-1", Message: "hello"}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/prompt", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handlePrompt(rec, req)
+
+	if rec.Code < 400 || rec.Code >= 500 {
+		t.Fatalf("status = %d, body=%s, want a 4xx status for an invalid target", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHandlePrompt_QueuesPromptForSession pins the full happy path: POST
 // /prompt injects the message into the named project's session as an agent
 // prompt via the same handleMessage entry the platforms use (NOT
