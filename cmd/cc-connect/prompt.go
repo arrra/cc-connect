@@ -94,7 +94,13 @@ func parsePromptArgs(args []string) (core.PromptRequest, string, error) {
 			dataDir = args[i]
 		case "--help", "-h":
 			return req, "", errPromptUsage
+		case "--":
+			positional = append(positional, args[i+1:]...)
+			i = len(args)
 		default:
+			if strings.HasPrefix(args[i], "-") && args[i] != "-" {
+				return req, "", fmt.Errorf("unknown option: %s", args[i])
+			}
 			positional = append(positional, args[i])
 		}
 	}
