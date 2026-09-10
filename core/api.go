@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -199,7 +200,7 @@ func (s *APIServer) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" || req.SessionKey == "" {
+	if strings.TrimSpace(req.Message) == "" || req.SessionKey == "" {
 		http.Error(w, "session_key and message are required", http.StatusBadRequest)
 		return
 	}

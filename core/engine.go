@@ -22,8 +22,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	sessv1 "github.com/chenhg5/cc-connect/core/session"
 	"github.com/chenhg5/cc-connect/core/hexmem"
+	sessv1 "github.com/chenhg5/cc-connect/core/session"
 )
 
 const maxPlatformMessageLen = 4000
