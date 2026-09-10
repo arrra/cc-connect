@@ -5,6 +5,9 @@ import (
 )
 
 func TestParsePromptArgs_RequiresSessionKey(t *testing.T) {
+	t.Setenv("CC_SESSION_KEY", "")
+	t.Setenv("CC_PROJECT", "")
+
 	_, _, err := parsePromptArgs([]string{"-m", "hello"})
 	if err == nil {
 		t.Fatal("expected error when session key is missing")
