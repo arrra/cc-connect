@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,11 @@ import (
 	"sync"
 	"time"
 )
+
+// maxPromptBodyBytes bounds the size of a POST /prompt request body before
+// JSON decoding, so an oversized payload is rejected (413) instead of being
+// buffered and decoded in full.
+const maxPromptBodyBytes = 1 << 20 // 1 MiB
 
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
@@ -196,7 +202,13 @@ func (s *APIServer) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req PromptRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxPromptBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
