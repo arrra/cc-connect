@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -100,5 +102,45 @@ func TestWebhookServer_DefaultValues(t *testing.T) {
 	}
 	if ws.path != "/hook" {
 		t.Errorf("expected default path /hook, got %s", ws.path)
+	}
+}
+
+func TestWebhookServer_NoGenericHook_Returns404(t *testing.T) {
+	// Find a free port.
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	ws := NewWebhookServer(port, "", "/twilio")
+	ws.NoGenericHook = true
+	ws.Handle("/twilio/sub", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.Start()
+	t.Cleanup(ws.Stop)
+
+	base := fmt.Sprintf("http://localhost:%d", port)
+
+	// Sub-route must be reachable.
+	resp, err := http.Get(base + "/twilio/sub")
+	if err != nil {
+		t.Fatalf("GET /twilio/sub: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for /twilio/sub, got %d", resp.StatusCode)
+	}
+
+	// The generic hook path must NOT be registered (returns 404).
+	resp2, err := http.Post(base+"/twilio", "application/json", nil) //nolint:bodyclose
+	if err != nil {
+		t.Fatalf("POST /twilio: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for /twilio with NoGenericHook=true, got %d", resp2.StatusCode)
 	}
 }

@@ -182,6 +182,7 @@ func main() {
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
+	var allPlatforms []core.Platform
 
 	for _, proj := range cfg.Projects {
 		// Inject project-level run_as_user / run_as_env into the agent's
@@ -219,6 +220,7 @@ func main() {
 			}
 			platforms = append(platforms, p)
 		}
+		allPlatforms = append(allPlatforms, platforms...)
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
@@ -673,6 +675,9 @@ func main() {
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
 
+	// Wire Twilio bridge (registers HTTP routes + Slack bang commands; no-op when unconfigured).
+	twilioBridgeSrv := wireTwilioBridge(allPlatforms, cfg.DataDir)
+
 	// Start cron scheduler
 	cronStore, err := core.NewCronStore(cfg.DataDir)
 	if err != nil {
@@ -985,6 +990,9 @@ func main() {
 	}
 	if webhookSrv != nil {
 		webhookSrv.Stop()
+	}
+	if twilioBridgeSrv != nil {
+		twilioBridgeSrv.Stop()
 	}
 	heartbeatSched.Stop()
 	if cronSched != nil {
